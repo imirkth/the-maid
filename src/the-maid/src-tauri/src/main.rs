@@ -3,18 +3,83 @@
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
 use tauri::Manager;
-use std::process::Command;
 use std::path::PathBuf;
+use std::sync::{Arc, Mutex};
 
 mod commands;
 
+use maid_sidecar::SidecarManager;
+
+/// Shared sidecar manager — accessible from commands.
+pub struct AppState {
+    pub sidecar: Arc<SidecarManager>,
+}
+
+fn resolve_backend_path(app: &tauri::AppHandle) -> PathBuf {
+    if cfg!(target_os = "windows") {
+        app.path()
+            .resolve("backend/the_maid_backend.exe", tauri::BaseDirectory::Resource)
+            .unwrap_or_else(|_| {
+                // Dev fallback
+                let workspace = std::env::var("MAID_WORKSPACE")
+                    .unwrap_or_else(|_| String::from("."));
+                PathBuf::from(workspace).join("src/the-maid/backend/run.py")
+            })
+    } else {
+        // Development: run from workspace
+        let workspace = std::env::var("MAID_WORKSPACE")
+            .unwrap_or_else(|_| {
+                let home = std::env::var("HOME").unwrap_or_else(|_| String::from("."));
+                format!("{}/.openclaw/workspace-the-maid", home)
+            });
+        PathBuf::from(workspace).join("src/the-maid/backend/run.py")
+    }
+}
+
 fn main() {
+    env_logger::init();
+
     tauri::Builder::default()
         .plugin(tauri_plugin_shell::init())
         .setup(|app| {
-            // Spawn Python backend on startup
-            let app_handle = app.handle();
-            spawn_python_backend(app_handle)?;
+            let app_handle = app.handle().clone();
+            let backend_path = resolve_backend_path(&app_handle);
+
+            log::info!("[The Maid] Starting Python backend at: {:?}", backend_path);
+
+            let manager = Arc::new(SidecarManager::new(backend_path));
+
+            // Spawn in a separate thread so we don't block setup
+            let manager_clone = manager.clone();
+            let emit_handle = app_handle.clone();
+            std::thread::spawn(move || {
+                match manager_clone.spawn() {
+                    Ok(()) => {
+                        log::info!("[The Maid] Python backend is READY");
+                        let _ = emit_handle.emit("backend_ready", true);
+                    }
+                    Err(e) => {
+                        log::error!("[The Maid] Failed to start Python backend: {}", e);
+                        // Attempt restart with backoff
+                        match manager_clone.restart_with_backoff() {
+                            Ok(()) => {
+                                log::info!("[The Maid] Python backend restarted successfully");
+                                let _ = emit_handle.emit("backend_ready", true);
+                            }
+                            Err(e2) => {
+                                log::error!("[The Maid] Python backend failed after restarts: {}", e2);
+                                let _ = emit_handle.emit("backend_ready", false);
+                            }
+                        }
+                    }
+                }
+            });
+
+            // Store sidecar manager in app state
+            app.manage(AppState {
+                sidecar: manager,
+            });
+
             Ok(())
         })
         .invoke_handler(tauri::generate_handler![
@@ -31,23 +96,4 @@ fn main() {
         ])
         .run(tauri::generate_context!())
         .expect("error while running The Maid application");
-}
-
-fn spawn_python_backend(app: &tauri::AppHandle) -> Result<(), Box<dyn std::error::Error>> {
-    // Determine Python backend path
-    let backend_path = if cfg!(target_os = "windows") {
-        app.path().resolve("backend/the_maid_backend.exe", tauri::BaseDirectory::Resource)?
-    } else {
-        // Development: run from workspace
-        let workspace = std::env::var("MAID_WORKSPACE")
-            .unwrap_or_else(|_| String::from("~/.openclaw/workspace-the-maid"));
-        let expanded = shellexpand::tilde(&workspace);
-        PathBuf::from(expanded.to_string()).join("backend/run.py")
-    };
-
-    println!("[The Maid] Starting Python backend at: {:?}", backend_path);
-
-    // TODO: Start Python HTTP server on port 9473
-    // For now, log the intent
-    Ok(())
 }
