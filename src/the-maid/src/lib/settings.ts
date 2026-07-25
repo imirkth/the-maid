@@ -34,7 +34,11 @@ const SYSTEM_DIRS = [
 
 export function isSystemPath(path: string): boolean {
   const normalized = path.replace(/\\/g, "/");
-  return SYSTEM_DIRS.some((d) => normalized.startsWith(d.replace(/\\/g, "/")));
+  return SYSTEM_DIRS.some((d) => {
+    const dir = d.replace(/\\/g, "/");
+    // Must match full component: either exact, or followed by /
+    return normalized === dir || normalized.startsWith(dir + "/");
+  });
 }
 
 export function validateFolderName(folder: string): { valid: boolean; error?: string } {

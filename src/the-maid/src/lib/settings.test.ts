@@ -25,6 +25,12 @@ describe("Settings — folder validation", () => {
     expect(validateFolderName("C:\\Windows\\System32").valid).toBe(false);
   });
 
+  it("accepts paths that share a prefix with system dirs", () => {
+    expect(validateFolderName("/etcetera").valid).toBe(true);
+    expect(validateFolderName("/usr.local").valid).toBe(true);
+    expect(validateFolderName("/binaries").valid).toBe(true);
+  });
+
   it("accepts normal folder names", () => {
     expect(validateFolderName("Desktop").valid).toBe(true);
     expect(validateFolderName("Downloads").valid).toBe(true);
@@ -47,11 +53,17 @@ describe("Settings — system path detection", () => {
     expect(isSystemPath("C:\\ProgramData\\config")).toBe(true);
   });
 
-  it("allows user dirs", () => {
-    expect(isSystemPath("/home/user/Desktop")).toBe(false);
-    expect(isSystemPath("/tmp/test")).toBe(false);
-    expect(isSystemPath("Desktop")).toBe(false);
-    expect(isSystemPath("~/Pictures")).toBe(false);
+  it("does not match user paths that start with system prefix", () => {
+    expect(isSystemPath("/etcetera/config")).toBe(false);
+    expect(isSystemPath("/usr.local")).toBe(false);
+    expect(isSystemPath("/binaries/data")).toBe(false);
+    expect(isSystemPath("/variations")).toBe(false);
+  });
+
+  it("requires system path to be a full path component", () => {
+    expect(isSystemPath("/etc/passwd")).toBe(true);
+    expect(isSystemPath("/etc/")).toBe(true);
+    expect(isSystemPath("/etc")).toBe(true);
   });
 });
 

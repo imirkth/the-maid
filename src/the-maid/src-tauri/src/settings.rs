@@ -44,6 +44,12 @@ pub struct BucketEntry {
     pub path: String,
 }
 
+impl Default for Settings {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl Settings {
     /// Create settings with defaults for a first-run user.
     pub fn new() -> Self {
@@ -68,7 +74,7 @@ impl Settings {
         serde_json::from_str(&data).map_err(|e| format!("Failed to parse settings: {}", e))
     }
 
-    /// Save settings to ~/.the-maid/settings.json.
+    /// Save settings atomically to avoid corrupting the file on crash.
     pub fn save(&self) -> Result<(), String> {
         let path = settings_path()?;
         if let Some(parent) = path.parent() {
@@ -77,7 +83,11 @@ impl Settings {
         }
         let data = serde_json::to_string_pretty(self)
             .map_err(|e| format!("Failed to serialize settings: {}", e))?;
-        fs::write(&path, data).map_err(|e| format!("Failed to write settings: {}", e))
+        let tmp = path.with_extension("json.tmp");
+        fs::write(&tmp, data).map_err(|e| format!("Failed to write settings temp: {}", e))?;
+        fs::rename(&tmp, &path)
+            .map_err(|e| format!("Failed to commit settings: {}", e))?;
+        Ok(())
     }
 
     /// Mark first run complete.
@@ -112,11 +122,17 @@ impl Settings {
         self.sandbox_folders.retain(|f| f != folder);
     }
 
-    /// Add a bucket.
+    /// Add a bucket. IDs are never reused so removing and re-adding cannot collide.
     pub fn add_bucket(&mut self, name: &str, path: &str) {
-        let id = format!("{}", self.buckets.len() + 1);
+        let next_id = self
+            .buckets
+            .iter()
+            .filter_map(|b| b.id.parse::<usize>().ok())
+            .max()
+            .unwrap_or(0)
+            + 1;
         self.buckets.push(BucketEntry {
-            id,
+            id: next_id.to_string(),
             name: name.to_string(),
             path: path.to_string(),
         });
@@ -173,6 +189,43 @@ mod tests {
         assert_eq!(settings.sandbox_folders.len(), 4);
         assert!(settings.sandbox_folders.contains(&"Desktop".to_string()));
         assert!(settings.buckets.is_empty());
+        std::fs::remove_dir_all(&tmp).ok();
+    }
+
+    #[test]
+    fn test_default_impl_matches_new() {
+        let from_default = Settings::default();
+        let from_new = Settings::new();
+        assert_eq!(from_default.sandbox_folders, from_new.sandbox_folders);
+        assert_eq!(from_default.first_run, from_new.first_run);
+        assert_eq!(from_default.buckets, from_new.buckets);
+        assert_eq!(from_default.features.pdf_ocr, from_new.features.pdf_ocr);
+    }
+
+    #[test]
+    fn test_add_bucket_no_id_reuse() {
+        let mut settings = Settings::default();
+        settings.add_bucket("A", "~/A");
+        settings.add_bucket("B", "~/B");
+        settings.remove_bucket("1");
+        settings.add_bucket("C", "~/C");
+        assert_eq!(settings.buckets.len(), 2);
+        let ids: Vec<&str> = settings.buckets.iter().map(|b| b.id.as_str()).collect();
+        assert!(ids.contains(&"2"));
+        assert!(ids.contains(&"3"));
+    }
+
+    #[test]
+    fn test_save_atomic_leaves_no_temp_file() {
+        let tmp = setup_temp_settings();
+        let mut settings = Settings::load().unwrap();
+        settings.complete_first_run();
+        settings.save().unwrap();
+
+        let settings_file = settings_path().unwrap();
+        let temp_file = settings_file.with_extension("json.tmp");
+        assert!(settings_file.exists());
+        assert!(!temp_file.exists());
         std::fs::remove_dir_all(&tmp).ok();
     }
 

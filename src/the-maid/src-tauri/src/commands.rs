@@ -31,6 +31,10 @@ pub async fn save_settings(mut settings: Settings) -> Result<(), String> {
 
 #[tauri::command]
 pub async fn add_sandbox_folder(folder: String) -> Result<Settings, String> {
+    let expanded = expand_tilde(&folder);
+    if is_system_path(&expanded) {
+        return Err(format!("System directories are out of scope: '{}'", folder));
+    }
     let mut s = Settings::load()?;
     s.add_folder(&folder);
     s.save()?;
@@ -59,6 +63,12 @@ pub async fn complete_setup(
     face_clustering: bool,
     general_files: bool,
 ) -> Result<(), String> {
+    for folder in &folders {
+        let expanded = expand_tilde(folder);
+        if is_system_path(&expanded) {
+            return Err(format!("System directories are out of scope: '{}'", folder));
+        }
+    }
     let mut s = Settings::load()?;
     s.sandbox_folders = folders;
     s.set_features(pdf_ocr, face_clustering, general_files);
@@ -94,7 +104,8 @@ const SYSTEM_DIRS: &[&str] = &[
 fn is_system_path(path: &str) -> bool {
     let normalized = path.replace('\\', "/");
     for sys_dir in SYSTEM_DIRS {
-        if normalized.starts_with(sys_dir) {
+        let sys = sys_dir.replace('\\', "/");
+        if normalized == sys || normalized.starts_with(&format!("{}/", sys)) {
             return true;
         }
     }
@@ -271,18 +282,16 @@ pub async fn get_buckets() -> Result<Vec<Bucket>, String> {
 
 #[tauri::command]
 pub async fn add_bucket(bucket: Bucket) -> Result<(), String> {
-    let settings = Settings::load()?;
+    let mut settings = Settings::load()?;
     validate_path(&bucket.path, &settings.sandbox_folders)?;
-    // TODO: Save to settings
-    Ok(())
+    settings.add_bucket(&bucket.name, &bucket.path);
+    settings.save()
 }
 
 #[tauri::command]
 pub async fn check_sandbox(path: String) -> Result<bool, String> {
     let settings = Settings::load()?;
-    validate_path(&path, &settings.sandbox_folders)
-        .map(|_| true)
-        .or(Ok(false))
+    validate_path(&path, &settings.sandbox_folders).map(|_| true)
 }
 
 #[tauri::command]
@@ -319,10 +328,33 @@ pub struct UpdateInfo {
 const APP_VERSION: &str = "0.1.0";
 const UPDATE_URL: &str = "https://themaid.app/api/version";
 
+fn parse_version(v: &str) -> Option<Vec<u64>> {
+    v.split('.')
+        .map(|s| s.parse::<u64>().ok())
+        .collect()
+}
+
+fn version_greater_than(a: &str, b: &str) -> bool {
+    // ponytail: minimal semver-ish comparison; non-numeric versions are treated as newer
+    match (parse_version(a), parse_version(b)) {
+        (Some(a_parts), Some(b_parts)) => {
+            for (x, y) in a_parts.iter().zip(b_parts.iter()) {
+                if x != y {
+                    return x > y;
+                }
+            }
+            a_parts.len() > b_parts.len()
+        }
+        (Some(_), None) => false,
+        (None, Some(_)) => true,
+        (None, None) => a > b,
+    }
+}
+
 #[tauri::command]
 pub async fn check_updates() -> Result<UpdateInfo, String> {
     // ponytail: manual check only — no telemetry, no auto-polling (ADR 0007/0010)
-    let current_version = APP_VERSION.to_string();
+    let current_version = env_version().to_string();
     let client = reqwest::Client::builder()
         .timeout(std::time::Duration::from_secs(5))
         .build()
@@ -338,9 +370,9 @@ pub async fn check_updates() -> Result<UpdateInfo, String> {
             let latest = body
                 .get("version")
                 .and_then(|v| v.as_str())
-                .unwrap_or(APP_VERSION)
+                .unwrap_or(&current_version)
                 .to_string();
-            let update_available = latest != current_version;
+            let update_available = version_greater_than(&latest, &current_version);
             let release_notes = body
                 .get("notes")
                 .and_then(|v| v.as_str())
@@ -370,7 +402,12 @@ pub async fn check_updates() -> Result<UpdateInfo, String> {
 
 #[tauri::command]
 pub async fn get_app_version() -> Result<String, String> {
-    Ok(APP_VERSION.to_string())
+    Ok(env_version().to_string())
+}
+
+fn env_version() -> &'static str {
+    // Use Cargo package version at compile time instead of hardcoded constant.
+    option_env!("CARGO_PKG_VERSION").unwrap_or(APP_VERSION)
 }
 
 // --- Model status ---
@@ -505,6 +542,14 @@ mod tests {
     }
 
     #[test]
+    fn test_is_system_path_does_not_match_prefixes() {
+        assert!(!is_system_path("/etcetera/config"));
+        assert!(!is_system_path("/usr.local"));
+        assert!(!is_system_path("/binaries/data"));
+        assert!(!is_system_path("/variations"));
+    }
+
+    #[test]
     fn test_is_system_path_rejects_windows_system_dirs() {
         assert!(is_system_path("C:\\Windows\\System32"));
         assert!(is_system_path("C:\\Program Files\\app"));
@@ -590,6 +635,18 @@ mod tests {
         assert!(json.contains("0.1.0"));
         assert!(json.contains("0.2.0"));
         assert!(json.contains("update_available"));
+    }
+
+    #[test]
+    fn test_version_greater_than() {
+        assert!(version_greater_than("0.2.0", "0.1.0"));
+        assert!(version_greater_than("0.10.0", "0.2.0"));
+        assert!(version_greater_than("1.0.0", "0.9.9"));
+        assert!(version_greater_than("0.1.1", "0.1.0"));
+        assert!(!version_greater_than("0.1.0", "0.1.0"));
+        assert!(!version_greater_than("0.1.0", "0.2.0"));
+        assert!(!version_greater_than("0.1.0", "0.1.0.1")); // longer patch-only not greater if equal prefix
+        assert!(version_greater_than("0.1.0.1", "0.1.0")); // longer is greater when prefixes equal
     }
 
     #[test]

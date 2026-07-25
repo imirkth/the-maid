@@ -54,7 +54,9 @@ export default function SettingsPanel() {
   };
 
   const removeFolder = (folder: string) => {
-    invoke<Settings>("remove_sandbox_folder", { folder }).then(setSettings);
+    invoke<Settings>("remove_sandbox_folder", { folder })
+      .then(setSettings)
+      .catch((e) => setFolderError(String(e)));
   };
 
   const checkForUpdates = () => {
