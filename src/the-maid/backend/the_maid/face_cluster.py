@@ -128,6 +128,39 @@ def _validate_embedding(embedding: List[float]) -> bool:
     return all(_is_finite(v) for v in embedding)
 
 
+def _centroid(vectors: np.ndarray) -> np.ndarray:
+    """Compute L2-normalized mean centroid of a set of normalized vectors."""
+    if len(vectors) == 0:
+        return vectors
+    mean = vectors.mean(axis=0)
+    norm = np.linalg.norm(mean)
+    if norm == 0:
+        return mean
+    return mean / norm
+
+
+def _nearest_custom_label(
+    new_vectors: np.ndarray,
+    custom_centroids: List[Tuple[np.ndarray, str]],
+    eps: float,
+) -> Optional[str]:
+    """
+    Find the custom label whose previous centroid is closest to the new cluster's
+    centroid, within eps (cosine distance). Returns None if no match.
+    """
+    if not custom_centroids:
+        return None
+    new_centroid = _centroid(new_vectors)
+    best_label: Optional[str] = None
+    best_dist = float("inf")
+    for prev_centroid, label in custom_centroids:
+        dist = 1.0 - float(np.dot(new_centroid, prev_centroid))
+        if dist <= eps and dist < best_dist:
+            best_dist = dist
+            best_label = label
+    return best_label
+
+
 class FaceClusterer:
     """
     Stores face embeddings in SQLite and clusters them with DBSCAN.
@@ -142,10 +175,23 @@ class FaceClusterer:
         self._init_db()
 
     def _init_db(self) -> None:
-        """Create tables if not exists."""
+        """Create tables if not exists; guard against unsupported future schemas."""
         Path(self.db_path).parent.mkdir(parents=True, exist_ok=True)
         with sqlite3.connect(self.db_path) as conn:
             conn.executescript(_SCHEMA_SQL)
+            existing = conn.execute(
+                "SELECT value FROM schema_meta WHERE key = 'schema_version'"
+            ).fetchone()
+            if existing and existing[0] is not None:
+                try:
+                    existing_version = int(existing[0])
+                except ValueError:
+                    existing_version = 0
+                if existing_version > DB_SCHEMA_VERSION:
+                    raise RuntimeError(
+                        f"Database schema version {existing_version} is newer than "
+                        f"supported version {DB_SCHEMA_VERSION}. Please upgrade the app."
+                    )
             conn.execute("UPDATE schema_meta SET value = ? WHERE key = 'schema_version'",
                          (str(DB_SCHEMA_VERSION),))
 
@@ -171,22 +217,35 @@ class FaceClusterer:
         """
         Store multiple face embeddings from scan results.
         faces: list of dicts with file_id, file_path, face_index, embedding, confidence.
-        Invalid embeddings are skipped silently so one bad face does not break a batch.
-        Returns count stored.
+        Invalid embeddings or malformed dicts are skipped silently so one bad face
+        does not break a batch. Returns count stored.
         """
         count = 0
         with sqlite3.connect(self.db_path) as conn:
             for f in faces:
-                emb_arr = np.array(f["embedding"], dtype=np.float32)
+                try:
+                    file_id = f["file_id"]
+                    file_path = f["file_path"]
+                    face_index = f["face_index"]
+                    embedding = f["embedding"]
+                except KeyError:
+                    continue
+                if file_id is None or file_path is None:
+                    continue
+                emb_arr = np.array(embedding, dtype=np.float32)
                 if emb_arr.shape != (EMBEDDING_DIM,):
                     continue
                 if not np.all(np.isfinite(emb_arr)):
                     continue
+                confidence = f.get("confidence", 0.0)
+                if isinstance(confidence, (int, float)) and math.isfinite(confidence):
+                    confidence = float(confidence)
+                else:
+                    continue
                 conn.execute(
                     "INSERT INTO embeddings (file_id, file_path, face_index, embedding, confidence) "
                     "VALUES (?, ?, ?, ?, ?)",
-                    (f["file_id"], f["file_path"], f["face_index"],
-                     emb_arr.tobytes(), f.get("confidence", 0.0))
+                    (file_id, file_path, face_index, emb_arr.tobytes(), confidence)
                 )
                 count += 1
         return count
@@ -258,36 +317,45 @@ class FaceClusterer:
         # Run DBSCAN
         raw_labels = _dbscan(self.eps, self.min_samples, dist)
 
-        # Assign Unknown_Person_N labels to clusters (sorted by first appearance).
-        # Preserve already-named labels: if all rows for a cluster share a custom
-        # (non-Unknown_Person_*) label, keep it. Otherwise assign next free
-        # Unknown_Person_N number.
+        # Assign Unknown_Person_N labels to clusters.
+        # Preserve already-named custom labels by matching new cluster centroids to
+        # previous custom-labeled centroids (cosine distance <= eps). This is stable
+        # across re-runs regardless of DBSCAN's raw label numbering.
         label_map: Dict[int, str] = {}
-        existing_named: Dict[int, set[str]] = {}
 
-        # Read current DB labels grouped by cluster_id.
-        # We are about to overwrite cluster_id, so we use the old cluster_id from
-        # the previous run to detect preserved names.
+        # Build previous custom-labeled centroids from current DB before overwrite.
+        custom_centroids: List[Tuple[np.ndarray, str]] = []
         if metadata:
             with sqlite3.connect(self.db_path) as conn:
-                cur = conn.execute(
-                    "SELECT cluster_id, cluster_label FROM embeddings WHERE cluster_id >= 0"
+                rows = conn.execute(
+                    "SELECT id, cluster_id, cluster_label, embedding FROM embeddings"
+                ).fetchall()
+            prev_by_cluster: Dict[int, Dict[str, Any]] = {}
+            for row_id, cid, clabel, emb_blob in rows:
+                if cid is None or cid < 0:
+                    continue
+                if not clabel or clabel.startswith("Unknown_Person_"):
+                    continue
+                prev_by_cluster.setdefault(cid, {"label": clabel, "vectors": []})
+                prev_by_cluster[cid]["vectors"].append(
+                    np.frombuffer(emb_blob, dtype=np.float32)
                 )
-                for cid, clabel in cur.fetchall():
-                    existing_named.setdefault(cid, set())
-                    if clabel:
-                        existing_named[cid].add(clabel)
+            for info in prev_by_cluster.values():
+                if info["vectors"]:
+                    custom_centroids.append(
+                        (_centroid(np.array(info["vectors"])), info["label"])
+                    )
 
-        for label in raw_labels:
-            if label < 0 or label in label_map:
+        # Group vectors by new raw label so we can match centroids.
+        new_cluster_vectors: Dict[int, List[np.ndarray]] = {}
+        for i, label in enumerate(raw_labels):
+            if label < 0:
                 continue
-            # If every previous label for this cluster was identical and custom, reuse it.
-            preserved = None
-            prev_labels = existing_named.get(label, set())
-            if len(prev_labels) == 1:
-                prev = next(iter(prev_labels))
-                if not prev.startswith("Unknown_Person_"):
-                    preserved = prev
+            new_cluster_vectors.setdefault(label, []).append(vectors[i])
+
+        for label in sorted(new_cluster_vectors.keys()):
+            new_vecs = np.array(new_cluster_vectors[label])
+            preserved = _nearest_custom_label(new_vecs, custom_centroids, self.eps)
             if preserved:
                 label_map[label] = preserved
             else:
@@ -347,6 +415,28 @@ class FaceClusterer:
             })
 
         return list(clusters.values())
+
+    def get_clusters_for_ui(self) -> List[Dict[str, Any]]:
+        """
+        Return clusters formatted for the UI, including a representative face.
+        Representative is the highest-confidence face; ties break by first seen.
+        """
+        clusters = self.get_clusters()
+        ui_clusters: List[Dict[str, Any]] = []
+        for c in clusters:
+            faces = c["faces"]
+            representative = max(
+                faces,
+                key=lambda f: (f.get("confidence", 0.0), -faces.index(f)),
+            ) if faces else None
+            ui_clusters.append({
+                "cluster_id": c["cluster_id"],
+                "cluster_label": c["cluster_label"],
+                "representative": representative,
+                "face_count": len(faces),
+                "faces": faces,
+            })
+        return ui_clusters
 
     def rename_cluster(self, cluster_id: int, new_label: str) -> int:
         """
