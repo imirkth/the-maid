@@ -1,0 +1,10 @@
+{
+  "agent": "the-maid",
+  "name": "The Maid",
+  "emoji": "🧹",
+  "description": "Local-first AI file organizer & digital asset manager",
+  "status": "initialized",
+  "channel": "#project-the-maid",
+  "created": "2026-07-23",
+  "spec_version": "1.0"
+}

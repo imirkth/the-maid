@@ -1,0 +1,411 @@
+/* The Maid — Global Styles */
+
+:root {
+  --bg-primary: #0a0e1a;
+  --bg-secondary: #141b2d;
+  --bg-card: #1a1f3a;
+  --border: #2a3f5f;
+  --text-primary: #e0e0e0;
+  --text-secondary: #8a9bb0;
+  --accent: #00d4ff;
+  --accent-hover: #00b8e0;
+  --success: #10b981;
+  --warning: #f59e0b;
+  --danger: #ef4444;
+  --font-mono: 'Courier New', monospace;
+  --font-sans: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
+}
+
+* {
+  margin: 0;
+  padding: 0;
+  box-sizing: border-box;
+}
+
+body {
+  font-family: var(--font-sans);
+  background: var(--bg-primary);
+  color: var(--text-primary);
+  min-height: 100vh;
+  -webkit-font-smoothing: antialiased;
+}
+
+/* Layout */
+.app {
+  display: flex;
+  min-height: 100vh;
+}
+
+.sidebar {
+  width: 220px;
+  background: var(--bg-secondary);
+  border-right: 1px solid var(--border);
+  padding: 20px;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+.sidebar .logo {
+  font-size: 1.2rem;
+  font-weight: 600;
+  margin-bottom: 20px;
+  color: var(--accent);
+}
+
+.sidebar button {
+  background: transparent;
+  border: none;
+  color: var(--text-secondary);
+  padding: 12px 16px;
+  text-align: left;
+  border-radius: 8px;
+  cursor: pointer;
+  font-size: 0.95rem;
+  transition: all 0.2s;
+}
+
+.sidebar button:hover {
+  background: rgba(0, 212, 255, 0.1);
+  color: var(--text-primary);
+}
+
+.sidebar button.active {
+  background: rgba(0, 212, 255, 0.15);
+  color: var(--accent);
+}
+
+.content {
+  flex: 1;
+  padding: 30px;
+  overflow-y: auto;
+}
+
+/* Typography */
+h2 {
+  font-size: 1.5rem;
+  margin-bottom: 20px;
+  font-weight: 600;
+}
+
+h3 {
+  font-size: 1.1rem;
+  margin: 20px 0 10px;
+}
+
+p {
+  margin-bottom: 12px;
+  line-height: 1.5;
+}
+
+/* Buttons */
+button {
+  background: var(--bg-card);
+  border: 1px solid var(--border);
+  color: var(--text-primary);
+  padding: 10px 20px;
+  border-radius: 8px;
+  cursor: pointer;
+  font-size: 0.9rem;
+  transition: all 0.2s;
+}
+
+button:hover {
+  border-color: var(--accent);
+}
+
+button.primary {
+  background: linear-gradient(135deg, var(--accent), #7b68ee);
+  border: none;
+  font-weight: 600;
+}
+
+button.primary:hover {
+  opacity: 0.9;
+}
+
+button.danger {
+  background: rgba(239, 68, 68, 0.1);
+  border-color: var(--danger);
+  color: var(--danger);
+}
+
+button:disabled {
+  opacity: 0.5;
+  cursor: not-allowed;
+}
+
+/* Inputs */
+input[type="text"],
+input[type="checkbox"] {
+  background: var(--bg-card);
+  border: 1px solid var(--border);
+  color: var(--text-primary);
+  padding: 10px 14px;
+  border-radius: 8px;
+  font-size: 0.9rem;
+}
+
+input[type="text"]:focus {
+  outline: none;
+  border-color: var(--accent);
+}
+
+/* Progress Bar */
+.progress-bar {
+  height: 4px;
+  background: var(--bg-card);
+  border-radius: 2px;
+  margin: 20px 0;
+  overflow: hidden;
+}
+
+.progress-fill {
+  height: 100%;
+  background: linear-gradient(90deg, var(--accent), #7b68ee);
+  transition: width 0.3s ease;
+}
+
+/* Cards */
+.proposal-card,
+.cluster-card,
+.bucket-item {
+  background: var(--bg-card);
+  border: 1px solid var(--border);
+  border-radius: 12px;
+  padding: 20px;
+  margin-bottom: 16px;
+}
+
+.proposal-card.approved {
+  border-color: var(--success);
+}
+
+/* Tags */
+.tag {
+  display: inline-block;
+  background: rgba(0, 212, 255, 0.1);
+  border: 1px solid rgba(0, 212, 255, 0.3);
+  color: var(--accent);
+  padding: 4px 10px;
+  border-radius: 12px;
+  font-size: 0.8rem;
+  margin-right: 6px;
+}
+
+/* Error */
+.error {
+  background: rgba(239, 68, 68, 0.1);
+  border: 1px solid var(--danger);
+  color: var(--danger);
+  padding: 12px;
+  border-radius: 8px;
+  margin: 12px 0;
+}
+
+/* Code */
+code {
+  font-family: var(--font-mono);
+  background: rgba(0, 0, 0, 0.3);
+  padding: 2px 6px;
+  border-radius: 4px;
+  font-size: 0.85rem;
+}
+
+/* Empty State */
+.empty-state {
+  color: var(--text-secondary);
+  text-align: center;
+  padding: 40px;
+}
+
+/* Setup Wizard */
+.setup-wizard {
+  max-width: 600px;
+  margin: 0 auto;
+}
+
+.wizard-step {
+  text-align: center;
+  padding: 40px;
+}
+
+.wizard-step h2 {
+  font-size: 1.8rem;
+  margin-bottom: 16px;
+}
+
+.folder-grid {
+  display: grid;
+  grid-template-columns: repeat(2, 1fr);
+  gap: 12px;
+  margin: 24px 0;
+}
+
+.folder-checkbox {
+  background: var(--bg-card);
+  border: 1px solid var(--border);
+  padding: 16px;
+  border-radius: 8px;
+  cursor: pointer;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  transition: all 0.2s;
+}
+
+.folder-checkbox:hover {
+  border-color: var(--accent);
+}
+
+.folder-checkbox input {
+  width: 18px;
+  height: 18px;
+}
+
+.wizard-nav {
+  display: flex;
+  justify-content: space-between;
+  margin-top: 32px;
+}
+
+/* Scan View */
+.scan-input {
+  display: flex;
+  gap: 12px;
+  margin-bottom: 20px;
+}
+
+.scan-input input {
+  flex: 1;
+}
+
+/* Approval View */
+.approval-header {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  margin-bottom: 20px;
+}
+
+.approval-controls {
+  display: flex;
+  gap: 8px;
+  align-items: center;
+}
+
+.approval-stats {
+  color: var(--text-secondary);
+  margin-bottom: 16px;
+}
+
+.proposal-header {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  margin-bottom: 12px;
+}
+
+.proposal-paths {
+  font-size: 0.85rem;
+  margin: 8px 0;
+}
+
+.proposal-paths code {
+  display: block;
+  margin: 4px 0;
+}
+
+.rationale {
+  color: var(--text-secondary);
+  font-size: 0.85rem;
+  margin-top: 8px;
+  font-style: italic;
+}
+
+.approve-button {
+  width: 100%;
+  padding: 16px;
+  font-size: 1.1rem;
+  margin-top: 20px;
+}
+
+/* Bucket Manager */
+.bucket-list {
+  list-style: none;
+  margin: 16px 0;
+}
+
+.bucket-item {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  padding: 12px;
+  background: var(--bg-card);
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  margin-bottom: 8px;
+}
+
+.add-bucket {
+  margin-top: 24px;
+  padding-top: 24px;
+  border-top: 1px solid var(--border);
+}
+
+.add-bucket input {
+  margin-right: 8px;
+  margin-bottom: 8px;
+}
+
+/* Face Clusters */
+.clusters-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(200px, 1fr));
+  gap: 16px;
+  margin-top: 20px;
+}
+
+.cluster-card {
+  text-align: center;
+}
+
+.cluster-image img {
+  width: 100%;
+  height: 150px;
+  object-fit: cover;
+  border-radius: 8px;
+}
+
+/* Responsive */
+@media (max-width: 768px) {
+  .sidebar {
+    width: 100%;
+    position: fixed;
+    bottom: 0;
+    flex-direction: row;
+    justify-content: space-around;
+    padding: 8px;
+    z-index: 100;
+  }
+
+  .sidebar .logo {
+    display: none;
+  }
+
+  .content {
+    padding-bottom: 80px;
+  }
+
+  .folder-grid {
+    grid-template-columns: 1fr;
+  }
+}
+
+/* Coming Soon */
+.coming-soon {
+  text-align: center;
+  padding: 60px;
+  color: var(--text-secondary);
+  font-size: 1.2rem;
+}
