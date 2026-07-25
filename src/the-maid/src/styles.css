@@ -656,6 +656,159 @@ button.small {
   }
 }
 
+/* Settings Panel */
+.settings-panel {
+  max-width: 700px;
+}
+
+.settings-tabs {
+  display: flex;
+  gap: 4px;
+  margin-bottom: 20px;
+  border-bottom: 1px solid var(--border);
+}
+
+.settings-tabs button {
+  padding: 10px 16px;
+  border: none;
+  border-bottom: 2px solid transparent;
+  border-radius: 0;
+  background: transparent;
+  color: var(--text-secondary);
+  font-size: 0.9rem;
+}
+
+.settings-tabs button:hover {
+  background: rgba(0, 212, 255, 0.05);
+  color: var(--text-primary);
+}
+
+.settings-tabs button.active {
+  color: var(--accent);
+  border-bottom-color: var(--accent);
+}
+
+.settings-panel section {
+  margin-top: 8px;
+}
+
+.folder-list {
+  list-style: none;
+  margin: 16px 0;
+}
+
+.folder-list-item {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  padding: 10px 14px;
+  background: var(--bg-card);
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  margin-bottom: 8px;
+}
+
+.add-folder {
+  display: flex;
+  gap: 8px;
+  margin-top: 12px;
+}
+
+.add-folder input {
+  flex: 1;
+}
+
+/* Model list */
+.model-list {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+  margin: 16px 0;
+}
+
+.model-item {
+  background: var(--bg-card);
+  border: 1px solid var(--border);
+  padding: 16px;
+  border-radius: 8px;
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+}
+
+.model-info strong {
+  display: block;
+}
+
+.model-status.done {
+  color: var(--success);
+}
+
+.model-status.idle {
+  color: var(--text-secondary);
+}
+
+/* Update info */
+.update-info {
+  background: var(--bg-card);
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  padding: 16px;
+  margin-top: 16px;
+}
+
+.update-available {
+  color: var(--accent);
+  font-weight: 600;
+}
+
+.up-to-date {
+  color: var(--success);
+}
+
+.release-notes {
+  margin-top: 12px;
+  padding-top: 12px;
+  border-top: 1px dashed var(--border);
+}
+
+.release-notes h4 {
+  font-size: 0.9rem;
+  margin-bottom: 8px;
+}
+
+/* About sections */
+.about-section {
+  margin-top: 24px;
+  padding-top: 24px;
+  border-top: 1px solid var(--border);
+}
+
+.about-section h4 {
+  font-size: 1rem;
+  margin-bottom: 12px;
+}
+
+.about-section p {
+  font-size: 0.9rem;
+  margin-bottom: 6px;
+}
+
+.donate-btn {
+  background: linear-gradient(135deg, var(--accent), #7b68ee);
+  border: none;
+  color: white;
+  font-weight: 600;
+  padding: 12px 24px;
+  border-radius: 8px;
+  cursor: pointer;
+  margin-top: 12px;
+}
+
+.donate-btn:hover {
+  opacity: 0.9;
+}
+
 /* Coming Soon */
 .coming-soon {
   text-align: center;

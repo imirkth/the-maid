@@ -272,6 +272,118 @@ pub async fn cluster_faces(directory: String) -> Result<Vec<String>, String> {
     Ok(vec![])
 }
 
+// --- Update check ---
+
+#[derive(Serialize, Deserialize, Debug, Clone)]
+pub struct UpdateInfo {
+    pub current_version: String,
+    pub latest_version: String,
+    pub update_available: bool,
+    pub release_notes: Option<String>,
+    pub upgrade_price: Option<f32>, // ponytail: Some when a paid upgrade exists (ADR 0007)
+}
+
+const APP_VERSION: &str = "0.1.0";
+const UPDATE_URL: &str = "https://themaid.app/api/version";
+
+#[tauri::command]
+pub async fn check_updates() -> Result<UpdateInfo, String> {
+    // ponytail: manual check only — no telemetry, no auto-polling (ADR 0007/0010)
+    let current_version = APP_VERSION.to_string();
+    let client = reqwest::Client::builder()
+        .timeout(std::time::Duration::from_secs(5))
+        .build()
+        .map_err(|e| format!("Failed to create HTTP client: {}", e))?;
+
+    let resp = client.get(UPDATE_URL).send().await;
+    match resp {
+        Ok(r) if r.status().is_success() => {
+            let body: serde_json::Value = r.json().await
+                .map_err(|e| format!("Failed to parse update response: {}", e))?;
+            let latest = body.get("version")
+                .and_then(|v| v.as_str())
+                .unwrap_or(APP_VERSION)
+                .to_string();
+            let update_available = latest != current_version;
+            let release_notes = body.get("notes")
+                .and_then(|v| v.as_str())
+                .map(|s| s.to_string());
+            let upgrade_price = body.get("upgrade_price")
+                .and_then(|v| v.as_f64())
+                .map(|f| f as f32);
+            Ok(UpdateInfo {
+                current_version,
+                latest_version: latest,
+                update_available,
+                release_notes,
+                upgrade_price,
+            })
+        }
+        Ok(r) => {
+            // Non-200 — graceful failure
+            Err(format!("Update server returned status {}", r.status()))
+        }
+        Err(e) => {
+            // Network error — graceful failure (offline, DNS, etc.)
+            Err(format!("Could not check for updates: {}", e))
+        }
+    }
+}
+
+#[tauri::command]
+pub async fn get_app_version() -> Result<String, String> {
+    Ok(APP_VERSION.to_string())
+}
+
+// --- Model status ---
+
+#[derive(Serialize, Deserialize, Debug, Clone)]
+pub struct ModelStatus {
+    pub id: String,
+    pub name: String,
+    pub size_mb: u64,
+    pub downloaded: bool,
+    pub path: String,
+}
+
+#[tauri::command]
+pub async fn get_model_status() -> Result<Vec<ModelStatus>, String> {
+    // ponytail: check file existence in ~/.the-maid/models/ — no server, no telemetry
+    let home = std::env::var("HOME")
+        .or_else(|_| std::env::var("USERPROFILE"))
+        .map_err(|_| "Cannot determine home directory")?;
+    let models_dir = PathBuf::from(home).join(".the-maid").join("models");
+
+    let models = vec![
+        ("text", "Text LLM", 500),
+        ("pdf", "PDF OCR Model", 1000),
+        ("face", "Face Recognition Model", 100),
+    ];
+
+    Ok(models.iter().map(|(id, name, size_mb)| {
+        // ponytail: convention-based — model file is <id>.gguf or <id>/ directory
+        let model_path = models_dir.join(format!("{}.gguf", id));
+        let model_dir = models_dir.join(id);
+        let downloaded = model_path.exists() || model_dir.exists();
+        let path = if downloaded {
+            if model_path.exists() {
+                model_path.to_string_lossy().to_string()
+            } else {
+                model_dir.to_string_lossy().to_string()
+            }
+        } else {
+            String::new()
+        };
+        ModelStatus {
+            id: id.to_string(),
+            name: name.to_string(),
+            size_mb,
+            downloaded,
+            path,
+        }
+    }).collect())
+}
+
 // --- Face cluster commands ---
 
 #[derive(Serialize, Deserialize, Debug, Clone)]
@@ -409,6 +521,60 @@ mod tests {
         let folders = vec!["Desktop".to_string()];
         let result = validate_path(&format!("{}/Desktop/file.txt", home), &folders);
         assert!(result.is_ok());
+    }
+
+    #[test]
+    fn test_update_info_serialization() {
+        let info = UpdateInfo {
+            current_version: "0.1.0".to_string(),
+            latest_version: "0.2.0".to_string(),
+            update_available: true,
+            release_notes: Some("New features!".to_string()),
+            upgrade_price: Some(15.0),
+        };
+        let json = serde_json::to_string(\&info).unwrap();
+        assert!(json.contains("0.1.0"));
+        assert!(json.contains("0.2.0"));
+        assert!(json.contains("update_available"));
+    }
+
+    #[test]
+    fn test_update_info_no_upgrade() {
+        let info = UpdateInfo {
+            current_version: "0.1.0".to_string(),
+            latest_version: "0.1.0".to_string(),
+            update_available: false,
+            release_notes: None,
+            upgrade_price: None,
+        };
+        assert!(!info.update_available);
+        assert!(info.upgrade_price.is_none());
+    }
+
+    #[test]
+    fn test_model_status_default_not_downloaded() {
+        let status = ModelStatus {
+            id: "face".to_string(),
+            name: "Face Recognition Model".to_string(),
+            size_mb: 100,
+            downloaded: false,
+            path: String::new(),
+        };
+        assert!(!status.downloaded);
+        assert!(status.path.is_empty());
+    }
+
+    #[test]
+    fn test_model_status_downloaded() {
+        let status = ModelStatus {
+            id: "text".to_string(),
+            name: "Text LLM".to_string(),
+            size_mb: 500,
+            downloaded: true,
+            path: "/home/user/.the-maid/models/text.gguf".to_string(),
+        };
+        assert!(status.downloaded);
+        assert!(status.path.contains("text.gguf"));
     }
 
     #[test]
