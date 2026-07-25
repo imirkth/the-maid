@@ -10,6 +10,15 @@ pub struct Settings {
     pub sandbox_folders: Vec<String>,
     pub first_run: bool,
     pub buckets: Vec<BucketEntry>,
+    pub features: FeatureFlags,
+    pub setup_complete: bool,
+}
+
+#[derive(Serialize, Deserialize, Debug, Clone, Default)]
+pub struct FeatureFlags {
+    pub pdf_ocr: bool,
+    pub face_clustering: bool,
+    pub general_files: bool,
 }
 
 #[derive(Serialize, Deserialize, Debug, Clone, Default)]
@@ -26,6 +35,8 @@ impl Settings {
             sandbox_folders: default_folders(),
             first_run: true,
             buckets: vec![],
+            features: FeatureFlags::default(),
+            setup_complete: false,
         }
     }
 
@@ -57,6 +68,17 @@ impl Settings {
     /// Mark first run complete.
     pub fn complete_first_run(&mut self) {
         self.first_run = false;
+    }
+
+    /// Mark setup wizard complete — enables scanning.
+    pub fn complete_setup(&mut self) {
+        self.setup_complete = true;
+        self.first_run = false;
+    }
+
+    /// Set feature flags from setup wizard.
+    pub fn set_features(&mut self, pdf_ocr: bool, face_clustering: bool, general_files: bool) {
+        self.features = FeatureFlags { pdf_ocr, face_clustering, general_files };
     }
 
     /// Add a sandbox folder if not already present.
@@ -182,6 +204,28 @@ mod tests {
         assert!(settings.first_run);
         settings.complete_first_run();
         assert!(!settings.first_run);
+    }
+
+    #[test]
+    fn test_setup_complete_flag() {
+        let mut settings = Settings::new();
+        assert!(!settings.setup_complete);
+        assert!(settings.first_run);
+        settings.complete_setup();
+        assert!(settings.setup_complete);
+        assert!(!settings.first_run);
+    }
+
+    #[test]
+    fn test_set_features() {
+        let mut settings = Settings::new();
+        assert!(!settings.features.pdf_ocr);
+        assert!(!settings.features.face_clustering);
+        assert!(!settings.features.general_files);
+        settings.set_features(true, false, true);
+        assert!(settings.features.pdf_ocr);
+        assert!(!settings.features.face_clustering);
+        assert!(settings.features.general_files);
     }
 
     #[test]

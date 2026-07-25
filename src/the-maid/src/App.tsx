@@ -26,16 +26,15 @@ function App() {
 
   // Load settings on startup — determines if Setup Wizard should show
   useEffect(() => {
-    invoke<{ first_run: boolean }>("get_settings")
+    invoke<{ first_run: boolean; setup_complete: boolean }>("get_settings")
       .then((s) => {
-        setIsFirstRun(s.first_run);
+        setIsFirstRun(s.first_run || !s.setup_complete);
         setLoaded(true);
       })
       .catch(() => setLoaded(true)); // defaults to first run
   }, []);
 
   const handleSetupComplete = () => {
-    invoke("complete_first_run").catch(() => {});
     setIsFirstRun(false);
     setCurrentView("scan");
   };

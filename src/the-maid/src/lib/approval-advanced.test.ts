@@ -153,12 +153,12 @@ describe("validateEditedPath", () => {
   });
 
   it("accepts paths within sandbox folders", () => {
-    const result = validateEditedPath("/home/user/Desktop/file.txt", ["Desktop", "Downloads"]);
+    const result = validateEditedPath("/home/user/Desktop/file.txt", ["/home/user/Desktop", "/home/user/Downloads"]);
     expect(result.valid).toBe(true);
   });
 
   it("accepts paths within Downloads sandbox", () => {
-    const result = validateEditedPath("/home/user/Downloads/photo.jpg", ["Desktop", "Downloads"]);
+    const result = validateEditedPath("/home/user/Downloads/photo.jpg", ["/home/user/Desktop", "/home/user/Downloads"]);
     expect(result.valid).toBe(true);
   });
 

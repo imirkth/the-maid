@@ -15,6 +15,7 @@ interface ScanResult {
 interface Settings {
   sandbox_folders: string[];
   first_run: boolean;
+  setup_complete: boolean;
   buckets: { id: string; name: string; path: string }[];
 }
 
@@ -94,7 +95,7 @@ export default function ScanView() {
       <h2>📁 Scan Directory</h2>
 
       {!canScan && (
-        <p className="warning">⚠️ Select at least one folder in Settings before scanning.</p>
+        <p className="warning">⚠️ Complete the setup wizard and select at least one folder before scanning.</p>
       )}
 
       <div className="scan-input">

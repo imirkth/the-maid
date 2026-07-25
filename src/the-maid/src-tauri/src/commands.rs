@@ -42,6 +42,20 @@ pub async fn complete_first_run() -> Result<(), String> {
     s.save()
 }
 
+#[tauri::command]
+pub async fn complete_setup(
+    folders: Vec<String>,
+    pdf_ocr: bool,
+    face_clustering: bool,
+    general_files: bool,
+) -> Result<(), String> {
+    let mut s = Settings::load()?;
+    s.sandbox_folders = folders;
+    s.set_features(pdf_ocr, face_clustering, general_files);
+    s.complete_setup();
+    s.save()
+}
+
 // --- Sandbox validation ---
 
 // ponytail: simple path containment check instead of regex. Matches Python sandbox.py logic.
@@ -118,9 +132,9 @@ fn validate_path(path: &str, sandbox_folders: &[String]) -> Result<String, Strin
 
 #[tauri::command]
 pub async fn can_scan() -> Result<bool, String> {
-    // ponytail: scan gate — disabled until ≥1 sandbox folder selected
+    // ponytail: scan gate — disabled until setup wizard completes AND ≥1 sandbox folder selected
     let settings = Settings::load()?;
-    Ok(!settings.sandbox_folders.is_empty())
+    Ok(settings.setup_complete && !settings.sandbox_folders.is_empty())
 }
 
 // --- File proposal types ---
