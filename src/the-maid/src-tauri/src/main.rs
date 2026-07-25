@@ -8,8 +8,9 @@ use std::sync::Arc;
 
 mod commands;
 mod settings;
+mod sidecar;
 
-use maid_sidecar::{SidecarManager, SidecarEvent};
+use sidecar::{SidecarManager, SidecarEvent};
 
 /// Shared sidecar manager — accessible from commands.
 pub struct AppState {
@@ -48,7 +49,6 @@ fn main() {
 
             let manager = Arc::new(SidecarManager::new(backend_path));
 
-            // Spawn sidecar in a separate thread
             let manager_clone = manager.clone();
             let emit_handle = app_handle.clone();
             std::thread::spawn(move || {
@@ -57,7 +57,6 @@ fn main() {
                         log::info!("[The Maid] Python backend is READY");
                         let _ = emit_handle.emit("backend_ready", true);
 
-                        // Forward sidecar events to frontend
                         if let Some(rx) = manager_clone.take_event_receiver() {
                             let fwd_handle = emit_handle.clone();
                             std::thread::spawn(move || {
@@ -116,11 +115,9 @@ fn main() {
         .expect("error while running The Maid application");
 }
 
-/// Forward a SidecarEvent to the Tauri frontend via emit.
 fn forward_event(handle: &tauri::AppHandle, event: SidecarEvent) {
     match event {
         SidecarEvent::Stdout(line) => {
-            // Try to parse as JSON event { "event": "scan_progress", "progress": 0.5 }
             if let Ok(val) = serde_json::from_str::<serde_json::Value>(&line) {
                 if let Some(event_name) = val.get("event").and_then(|v| v.as_str()) {
                     match event_name {
@@ -137,7 +134,6 @@ fn forward_event(handle: &tauri::AppHandle, event: SidecarEvent) {
                     }
                 }
             } else {
-                // Plain text — emit as raw log
                 let _ = handle.emit("python_log", line);
             }
         }

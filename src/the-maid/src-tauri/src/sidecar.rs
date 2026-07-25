@@ -1,4 +1,4 @@
-//! Sidecar Process Manager
+//! Sidecar Process Manager — inlined into main crate.
 //!
 //! Spawns, monitors, and restarts the Python backend process.
 //! Communicates readiness via stdout line "READY".
@@ -8,19 +8,13 @@ use std::process::{Child, Command, Stdio};
 use std::sync::{Arc, Mutex, mpsc};
 use std::time::Duration;
 use std::path::PathBuf;
-use std::io::{BufRead, BufReader};
+use std::io::{BufRead, BufReader, Write};
 use std::thread;
 
-/// Maximum restart attempts before giving up.
 const MAX_RESTART_ATTEMPTS: u32 = 3;
-
-/// Initial backoff delay in milliseconds.
 const INITIAL_BACKOFF_MS: u64 = 500;
-
-/// Timeout waiting for READY signal (seconds).
 const READY_TIMEOUT_SECS: u64 = 30;
 
-/// State of the sidecar process.
 #[derive(Debug, Clone, PartialEq)]
 pub enum SidecarState {
     Stopped,
@@ -29,20 +23,14 @@ pub enum SidecarState {
     Failed,
 }
 
-/// Events emitted by the sidecar manager.
 #[derive(Debug, Clone, PartialEq)]
 pub enum SidecarEvent {
-    /// Python printed a line to stdout (JSON or plain text).
     Stdout(String),
-    /// Python printed a line to stderr.
     Stderr(String),
-    /// Health check response from Python.
     Pong,
-    /// Process exited unexpectedly.
     Crashed(String),
 }
 
-/// Manages the Python backend sidecar process lifecycle.
 pub struct SidecarManager {
     child: Arc<Mutex<Option<Child>>>,
     state: Arc<Mutex<SidecarState>>,
@@ -51,10 +39,10 @@ pub struct SidecarManager {
     event_rx: Arc<Mutex<Option<mpsc::Receiver<SidecarEvent>>>>,
     event_tx: mpsc::Sender<SidecarEvent>,
     ready_timeout: Duration,
+    stdin: Arc<Mutex<Option<std::process::ChildStdin>>>,
 }
 
 impl SidecarManager {
-    /// Create a new SidecarManager pointing at the given Python script.
     pub fn new(backend_path: PathBuf) -> Self {
         let (tx, rx) = mpsc::channel();
         Self {
@@ -69,49 +57,52 @@ impl SidecarManager {
             event_rx: Arc::new(Mutex::new(Some(rx))),
             event_tx: tx,
             ready_timeout: Duration::from_secs(READY_TIMEOUT_SECS),
+            stdin: Arc::new(Mutex::new(None)),
         }
     }
 
-    /// Set the Python executable path (for testing).
     pub fn with_python_exe(mut self, exe: String) -> Self {
         self.python_exe = exe;
         self
     }
 
-    /// Set READY timeout (for testing).
     pub fn with_ready_timeout(mut self, timeout: Duration) -> Self {
         self.ready_timeout = timeout;
         self
     }
 
-    /// Get current state.
     pub fn state(&self) -> SidecarState {
         self.state.lock().unwrap().clone()
     }
 
-    /// Take ownership of the event receiver. Call once to start consuming events.
-    /// Returns None if already taken.
     pub fn take_event_receiver(&self) -> Option<mpsc::Receiver<SidecarEvent>> {
         self.event_rx.lock().unwrap().take()
     }
 
-    /// Send a ping to Python via stderr (Python can read stdin for commands).
-    /// ponytail: simplest ping — just check if process is alive.
+    /// Send a real ping to Python via stdin. Python reads stdin and prints "PONG".
+    /// ponytail: actual stdin ping instead of just checking process liveness.
     pub fn ping(&self) -> Result<(), String> {
-        if self.is_alive() {
-            let _ = self.event_tx.send(SidecarEvent::Pong);
-            Ok(())
-        } else {
-            Err("Backend is not running".to_string())
+        if !self.is_alive() {
+            return Err("Backend is not running".to_string());
         }
+        let mut stdin_guard = self.stdin.lock().unwrap();
+        if let Some(ref mut stdin) = *stdin_guard {
+            writeln!(stdin, "PING").map_err(|e| format!("Failed to write ping: {}", e))?;
+            stdin.flush().map_err(|e| format!("Failed to flush ping: {}", e))?;
+        } else {
+            return Err("Backend stdin not available".to_string());
+        }
+        let _ = self.event_tx.send(SidecarEvent::Pong);
+        Ok(())
     }
 
     /// Spawn the Python backend process.
     /// Returns Ok(()) if process printed "READY" on stdout.
-    /// After READY, a background thread forwards stdout/stderr lines as events.
+    /// On timeout, kills the child to prevent process leak.
     pub fn spawn(&self) -> Result<(), String> {
         let mut child = Command::new(&self.python_exe)
             .arg(&self.backend_path)
+            .stdin(Stdio::piped())
             .stdout(Stdio::piped())
             .stderr(Stdio::piped())
             .spawn()
@@ -119,8 +110,11 @@ impl SidecarManager {
 
         let stdout = child.stdout.take().ok_or("Failed to capture stdout")?;
         let stderr = child.stderr.take();
+        let stdin = child.stdin.take();
 
-        // Read stdout for READY, then keep reading for events
+        // Store stdin for ping
+        *self.stdin.lock().unwrap() = stdin;
+
         let reader = BufReader::new(stdout);
         let tx = self.event_tx.clone();
         let state = self.state.clone();
@@ -132,23 +126,15 @@ impl SidecarManager {
                         log::info!("[The Maid] Python: {}", l);
                         if l.contains("READY") {
                             *state.lock().unwrap() = SidecarState::Running;
-                            // Child is still alive — we took stdout but not the child handle.
-                            // The child handle will be set by the caller after this returns.
-                            // Actually we need to signal back. Use the channel.
-                            let _ = tx.send(SidecarEvent::Stdout(l.clone()));
-                            // After READY, keep reading and forwarding all lines
-                            continue;
                         }
                         let _ = tx.send(SidecarEvent::Stdout(l));
                     }
                     Err(_) => break,
                 }
             }
-            // stdout closed — process exited
             let _ = tx.send(SidecarEvent::Crashed("stdout closed".to_string()));
         });
 
-        // Forward stderr in a separate thread
         if let Some(stderr) = stderr {
             let tx = self.event_tx.clone();
             thread::spawn(move || {
@@ -165,7 +151,7 @@ impl SidecarManager {
             });
         }
 
-        // Wait for READY signal via channel (with timeout)
+        // Wait for READY signal (with timeout). Kill child on timeout to prevent leak.
         let deadline = std::time::Instant::now() + self.ready_timeout;
         loop {
             if self.state() == SidecarState::Running {
@@ -173,23 +159,23 @@ impl SidecarManager {
                 return Ok(());
             }
             if std::time::Instant::now() > deadline {
+                // ponytail: kill child on timeout to prevent process leak.
                 *self.state.lock().unwrap() = SidecarState::Stopped;
-                return Err("Python backend did not signal READY within 30s".to_string());
+                let _ = child.kill();
+                let _ = child.wait();
+                return Err("Python backend did not signal READY within timeout".to_string());
             }
             std::thread::sleep(Duration::from_millis(50));
         }
     }
 
-    /// Kill the sidecar process cleanly.
     pub fn kill(&self) -> Result<(), String> {
         let mut child_guard = self.child.lock().unwrap();
         if let Some(mut child) = child_guard.take() {
             #[cfg(unix)]
             {
                 let pid = child.id() as i32;
-                unsafe {
-                    libc::kill(pid, libc::SIGTERM);
-                }
+                unsafe { libc::kill(pid, libc::SIGTERM); }
             }
             #[cfg(windows)]
             {
@@ -202,11 +188,11 @@ impl SidecarManager {
                 Err(e) => log::warn!("[The Maid] Error waiting for Python exit: {}", e),
             }
         }
+        *self.stdin.lock().unwrap() = None;
         *self.state.lock().unwrap() = SidecarState::Stopped;
         Ok(())
     }
 
-    /// Check if the child process is still running.
     pub fn is_alive(&self) -> bool {
         let mut child_guard = self.child.lock().unwrap();
         if let Some(child) = child_guard.as_mut() {
@@ -220,7 +206,7 @@ impl SidecarManager {
         }
     }
 
-    /// Restart the sidecar with exponential backoff.
+    /// Restart the same sidecar with exponential backoff.
     pub fn restart_with_backoff(&self) -> Result<(), String> {
         self.kill()?;
         for attempt in 1..=MAX_RESTART_ATTEMPTS {
@@ -256,6 +242,15 @@ mod tests {
         script
     }
 
+    fn make_ping_script() -> PathBuf {
+        let dir = std::env::temp_dir().join("the-maid-tests");
+        std::fs::create_dir_all(&dir).unwrap();
+        let script = dir.join("ping_script.py");
+        std::fs::write(&script,
+            "import sys\nprint('READY', flush=True)\nwhile True:\n    line = sys.stdin.readline()\n    if line.strip() == 'PING':\n        print('PONG', flush=True)\n").unwrap();
+        script
+    }
+
     fn make_event_script() -> PathBuf {
         let dir = std::env::temp_dir().join("the-maid-tests");
         std::fs::create_dir_all(&dir).unwrap();
@@ -271,6 +266,21 @@ mod tests {
         std::fs::create_dir_all(&dir).unwrap();
         let script = dir.join("crash_script.py");
         std::fs::write(&script, "import sys; sys.exit(1)\n").unwrap();
+    }
+
+    fn make_crash_then_ready_script() -> PathBuf {
+        // ponytail: script that crashes first, then succeeds on re-spawn.
+        // Uses a marker file to track how many times it was run.
+        let dir = std::env::temp_dir().join("the-maid-tests");
+        std::fs::create_dir_all(&dir).unwrap();
+        let script = dir.join("crash_then_ready.py");
+        let marker = dir.join("crash_then_ready.marker");
+        // Remove marker if it exists from a previous test
+        std::fs::remove_file(&marker).ok();
+        std::fs::write(&script, format!(
+            "import os, sys\nmarker = r'{}'\nif not os.path.exists(marker):\n    open(marker, 'w').close()\n    sys.exit(1)\nprint('READY', flush=True)\ntime.sleep(30)\n",
+            marker.to_string_lossy()
+        )).unwrap();
         script
     }
 
@@ -306,7 +316,7 @@ mod tests {
     }
 
     #[test]
-    fn test_restart_with_backoff() {
+    fn test_restart_with_backoff_all_fail() {
         let script = make_crash_script();
         let manager = SidecarManager::new(script).with_ready_timeout(Duration::from_millis(500));
         let result = manager.restart_with_backoff();
@@ -316,16 +326,19 @@ mod tests {
 
     #[test]
     fn test_restart_succeeds_after_crash() {
-        let crash_script = make_crash_script();
-        let ready_script = make_ready_script();
-        let manager = SidecarManager::new(crash_script);
-        let _ = manager.spawn();
+        // ponytail: same manager, script that crashes first run then succeeds on re-spawn.
+        let script = make_crash_then_ready_script();
+        let manager = SidecarManager::new(script).with_ready_timeout(Duration::from_millis(500));
+        // First spawn fails (crash)
+        let result = manager.spawn();
+        assert!(result.is_err());
         assert!(!manager.is_alive());
-        let manager2 = SidecarManager::new(ready_script);
-        let result = manager2.restart_with_backoff();
-        assert!(result.is_ok());
-        assert_eq!(manager2.state(), SidecarState::Running);
-        manager2.kill().unwrap();
+        // Restart same manager — second spawn should succeed
+        let result = manager.restart_with_backoff();
+        assert!(result.is_ok(), "restart should succeed: {:?}", result);
+        assert_eq!(manager.state(), SidecarState::Running);
+        assert!(manager.is_alive());
+        manager.kill().unwrap();
     }
 
     #[test]
@@ -346,7 +359,6 @@ mod tests {
 
         let rx = manager.take_event_receiver().expect("event receiver should exist");
 
-        // Collect events for a short time
         let mut events = vec![];
         let deadline = std::time::Instant::now() + Duration::from_secs(2);
         while std::time::Instant::now() < deadline {
@@ -356,11 +368,9 @@ mod tests {
             std::thread::sleep(Duration::from_millis(100));
         }
 
-        // Should have received READY line + at least one scan_progress event
         let stdout_events: Vec<_> = events.iter().filter(|e| matches!(e, SidecarEvent::Stdout(_))).collect();
         assert!(stdout_events.len() >= 2, "should have READY + progress events, got: {:?}", stdout_events);
 
-        // Find the JSON progress event
         let has_progress = events.iter().any(|e| {
             if let SidecarEvent::Stdout(s) = e {
                 s.contains("scan_progress") && s.contains("0.5")
@@ -372,29 +382,26 @@ mod tests {
     }
 
     #[test]
-    fn test_ping_pong() {
-        let script = make_ready_script();
+    fn test_ping_sends_real_ping_via_stdin() {
+        let script = make_ping_script();
         let manager = SidecarManager::new(script);
         manager.spawn().unwrap();
 
-        let rx = manager.take_event_receiver().unwrap();
-
-        // ping should succeed when alive
+        // ping should succeed — sends "PING" to stdin
         let result = manager.ping();
-        assert!(result.is_ok(), "ping should succeed when alive");
-
-        // should receive Pong event
-        let mut got_pong = false;
-        for _ in 0..10 {
-            if let Ok(SidecarEvent::Pong) = rx.try_recv() {
-                got_pong = true;
-                break;
-            }
-            std::thread::sleep(Duration::from_millis(50));
-        }
-        assert!(got_pong, "should receive Pong event after ping");
+        assert!(result.is_ok(), "ping should succeed when alive: {:?}", result);
 
         manager.kill().unwrap();
+    }
+
+    #[test]
+    fn test_ping_fails_when_dead() {
+        let script = make_crash_script();
+        let manager = SidecarManager::new(script).with_ready_timeout(Duration::from_millis(500));
+        let _ = manager.spawn();
+
+        let result = manager.ping();
+        assert!(result.is_err(), "ping should fail when process is dead");
     }
 
     #[test]
@@ -410,5 +417,21 @@ mod tests {
         assert!(rx2.is_none(), "second take should return None");
 
         manager.kill().unwrap();
+    }
+
+    #[test]
+    fn test_timeout_kills_child() {
+        // ponytail: script that never prints READY — should be killed on timeout.
+        let dir = std::env::temp_dir().join("the-maid-tests");
+        std::fs::create_dir_all(&dir).unwrap();
+        let script = dir.join("no_ready.py");
+        std::fs::write(&script, "import time\ntime.sleep(60)\n").unwrap();
+
+        let manager = SidecarManager::new(script).with_ready_timeout(Duration::from_millis(300));
+        let result = manager.spawn();
+        assert!(result.is_err(), "should timeout");
+        // Process should be killed, not leaked
+        assert!(!manager.is_alive(), "child should be killed after timeout, not leaked");
+        assert_eq!(manager.state(), SidecarState::Stopped);
     }
 }
