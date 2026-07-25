@@ -18,4 +18,5 @@ export interface RenameResult {
   tagged: number;
   skipped: number;
   errors: string[];
+  success: boolean;
 }

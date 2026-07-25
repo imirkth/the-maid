@@ -114,6 +114,21 @@ class TestDBInit:
         FaceClusterer(db_path=temp_db)
         FaceClusterer(db_path=temp_db)
 
+    def test_default_db_path_creates_parent_directory(self, monkeypatch):
+        """Default path creates missing ~/.the-maid directory on first init."""
+        import tempfile
+        parent = tempfile.mkdtemp(prefix="the-maid-home-")
+        monkeypatch.setenv("HOME", parent)
+        clusterer = FaceClusterer()
+        assert Path(parent, ".the-maid", "face-index.db").exists()
+        clusterer.clear()
+
+    def test_corrupt_db_raises_clear_error(self, temp_db):
+        """A corrupt non-SQLite file should fail with a clear error when used as DB."""
+        Path(temp_db).write_text("not a sqlite file")
+        with pytest.raises(sqlite3.DatabaseError):
+            FaceClusterer(db_path=temp_db)
+
 
 # ─── Embedding Storage ───
 
@@ -158,6 +173,17 @@ class TestEmbeddingStorage:
         assert len(arr) == 128
         np.testing.assert_allclose(arr, np.array(emb, dtype=np.float32), rtol=1e-5)
 
+    def test_store_invalid_embedding_dimension(self, clusterer):
+        """Embedding with wrong dimension should be rejected."""
+        with pytest.raises(ValueError):
+            clusterer.store_embedding("f1", "/a.jpg", 0, [0.1] * 64)
+
+    def test_store_non_finite_embedding(self, clusterer):
+        """Embedding with NaN/Inf should be rejected."""
+        bad = [0.1] * 127 + [float("nan")]
+        with pytest.raises(ValueError):
+            clusterer.store_embedding("f1", "/a.jpg", 0, bad)
+
     def test_get_all_embeddings_empty(self, clusterer):
         vectors, metadata = clusterer.get_all_embeddings()
         assert len(vectors) == 0
@@ -188,6 +214,36 @@ class TestDBSCAN:
         dist = np.array([[0.0]])
         labels = _dbscan(0.4, 2, dist)
         assert labels == [-1]
+
+    def test_single_point_min_samples_one_is_cluster(self):
+        dist = np.array([[0.0]])
+        labels = _dbscan(0.4, 1, dist)
+        assert labels == [0]
+
+    def test_density_reachability_assigns_border_points(self):
+        """Border points reachable via other border points from a core point must join the cluster."""
+        # 3x3 grid. eps=0.35, min_samples=3. Center, edges, and corners form a chain.
+        # With min_samples=3 every point except the center has exactly 3 neighbors within eps
+        # (itself + 2 edge neighbors), so edges/corners become core and the whole grid clusters.
+        n = 9
+        dist = np.full((n, n), 0.99)
+        for i in range(3):
+            for j in range(3):
+                idx = i * 3 + j
+                dist[idx, idx] = 0.0
+                for di in (-1, 0, 1):
+                    for dj in (-1, 0, 1):
+                        if di == 0 and dj == 0:
+                            continue
+                        ni, nj = i + di, j + dj
+                        if 0 <= ni < 3 and 0 <= nj < 3:
+                            nidx = ni * 3 + nj
+                            d = 0.3 if (di == 0 or dj == 0) else 0.45
+                            dist[idx, nidx] = d
+        labels = _dbscan(0.35, 3, dist)
+        # All points should belong to a single cluster; none should be noise.
+        assert len(set(labels)) == 1, labels
+        assert all(l >= 0 for l in labels)
 
     def test_two_close_points_form_cluster(self):
         """Two points within eps should form a cluster (min_samples=2)."""
@@ -317,6 +373,31 @@ class TestClustering:
         assert "Unknown_Person_1" in labels
         assert "Unknown_Person_2" in labels
 
+    def test_unknown_person_labels_after_rename(self, clusterer):
+        """Renamed clusters keep their name; new unknown clusters use smallest free number."""
+        base1 = _make_embedding(1)
+        base2 = _make_embedding(99)
+        for i in range(2):
+            clusterer.store_embedding(f"f{i}", f"/a{i}.jpg", 0,
+                                      _make_similar_embedding(base1, noise=0.001))
+        for i in range(2):
+            clusterer.store_embedding(f"g{i}", f"/b{i}.jpg", 0,
+                                      _make_similar_embedding(base2, noise=0.001))
+        clusterer.cluster()
+        clusterer.rename_cluster(0, "Sarah")
+        # Add a brand new cluster after a rename
+        base3 = _make_embedding(50)
+        for i in range(2):
+            clusterer.store_embedding(f"h{i}", f"/c{i}.jpg", 0,
+                                      _make_similar_embedding(base3, noise=0.001))
+        result = clusterer.cluster()
+        labels = set(result["labels"].values())
+        # Previously cluster 0 was renamed to Sarah, so it should remain Sarah
+        assert "Sarah" in labels
+        # The remaining unnamed clusters should use sequential unknown numbers
+        assert "Unknown_Person_1" in labels
+        assert "Unknown_Person_2" in labels
+
     def test_cluster_label_format(self, clusterer):
         """Labels follow Unknown_Person_N format."""
         base = _make_embedding(1)
@@ -342,20 +423,33 @@ class TestClustering:
         clusters = clusterer.get_clusters()
         assert clusters == []
 
-    def test_rename_cluster(self, clusterer):
-        """rename_cluster updates the label."""
-        base = _make_embedding(1)
-        clusterer.store_embedding("f1", "/a.jpg", 0, base)
-        clusterer.store_embedding("f2", "/b.jpg", 0, _make_similar_embedding(base, noise=0.001))
+    def test_rename_cluster_preserves_label_ordering(self, clusterer):
+        """Renaming cluster 2 should not change numbering of other unknown clusters."""
+        base1 = _make_embedding(1)
+        base2 = _make_embedding(99)
+        # cluster 0
+        clusterer.store_embedding("f1", "/a.jpg", 0, base1)
+        clusterer.store_embedding("f2", "/b.jpg", 0, _make_similar_embedding(base1, noise=0.001))
+        # cluster 1
+        clusterer.store_embedding("f3", "/c.jpg", 0, base2)
+        clusterer.store_embedding("f4", "/d.jpg", 0, _make_similar_embedding(base2, noise=0.001))
         clusterer.cluster()
+        clusterer.rename_cluster(1, "Sarah")
 
-        clusters = clusterer.get_clusters()
-        cid = clusters[0]["cluster_id"]
-        count = clusterer.rename_cluster(cid, "Sarah")
-        assert count == 2
+        # Cluster 0 should remain Unknown_Person_1, cluster 1 now Sarah
+        with sqlite3.connect(clusterer.db_path) as conn:
+            rows = conn.execute(
+                "SELECT cluster_id, cluster_label FROM embeddings WHERE cluster_id >= 0 ORDER BY cluster_id"
+            ).fetchall()
+        assert rows[0] == (0, "Unknown_Person_1")
+        assert rows[1] == (0, "Unknown_Person_1")
+        assert rows[2] == (1, "Sarah")
+        assert rows[3] == (1, "Sarah")
 
-        clusters = clusterer.get_clusters()
-        assert clusters[0]["cluster_label"] == "Sarah"
+    def test_rename_cluster_nonexistent(self, clusterer):
+        """Renaming a nonexistent cluster returns zero updates."""
+        count = clusterer.rename_cluster(999, "Nobody")
+        assert count == 0
 
     def test_clear(self, clusterer):
         """clear removes all embeddings."""
@@ -378,6 +472,24 @@ class TestClustering:
         # The new face is noise (single, different from cluster)
         assert r2["n_noise"] >= 1
 
+    def test_recluster_renames_existing_labels(self, clusterer):
+        """Reclustering should reset old cluster labels so new numbering is consistent."""
+        base = _make_embedding(1)
+        clusterer.store_embedding("f1", "/a.jpg", 0, base)
+        clusterer.store_embedding("f2", "/b.jpg", 0, _make_similar_embedding(base, noise=0.001))
+        r1 = clusterer.cluster()
+        old_label = list(r1["labels"].values())[0]
+
+        # Add another face similar enough to merge into the same cluster (3 points now)
+        clusterer.store_embedding("f3", "/c.jpg", 0, _make_similar_embedding(base, noise=0.001))
+        r2 = clusterer.cluster()
+        assert r2["n_clusters"] == 1
+        new_label = list(r2["labels"].values())[0]
+        # Label numbering may be reset; all rows should share one current label
+        with sqlite3.connect(clusterer.db_path) as conn:
+            labels = {row[0] for row in conn.execute("SELECT DISTINCT cluster_label FROM embeddings WHERE cluster_id >= 0").fetchall()}
+        assert len(labels) == 1
+
     def test_configurable_eps(self, temp_db):
         """Higher eps clusters more aggressively."""
         base = _make_embedding(1)
@@ -395,6 +507,63 @@ class TestClustering:
         r_loose = c_loose.cluster()
 
         assert r_loose["n_clusters"] >= r_strict["n_clusters"]
+
+    def test_eps_too_large_one_cluster(self, temp_db):
+        """Eps very large should merge all faces into a single cluster."""
+        c = FaceClusterer(db_path=temp_db, eps=5.0, min_samples=2)
+        for seed in [1, 50, 99, 200]:
+            c.store_embedding(f"f{seed}", f"/{seed}.jpg", 0, _make_embedding(seed))
+        r = c.cluster()
+        assert r["n_clusters"] == 1
+        assert r["n_noise"] == 0
+
+    def test_eps_too_small_all_noise(self, temp_db):
+        """Eps tiny should mark all faces as noise."""
+        c = FaceClusterer(db_path=temp_db, eps=1e-6, min_samples=2)
+        base = _make_embedding(1)
+        c.store_embedding("f1", "/a.jpg", 0, base)
+        c.store_embedding("f2", "/b.jpg", 0, _make_similar_embedding(base, noise=0.001))
+        r = c.cluster()
+        assert r["n_clusters"] == 0
+        assert r["n_noise"] == 2
+
+    def test_min_samples_one_cluster(self, temp_db):
+        """min_samples=1 makes any point a cluster core point."""
+        c = FaceClusterer(db_path=temp_db, eps=0.4, min_samples=1)
+        c.store_embedding("f1", "/a.jpg", 0, _make_embedding(1))
+        r = c.cluster()
+        assert r["n_clusters"] == 1
+        assert r["n_noise"] == 0
+
+    def test_all_same_person_cluster(self, temp_db):
+        """Many slightly different faces of one person cluster together."""
+        c = FaceClusterer(db_path=temp_db, eps=0.4, min_samples=2)
+        base = _make_embedding(1)
+        for i in range(10):
+            c.store_embedding(f"f{i}", f"/{i}.jpg", 0,
+                              _make_similar_embedding(base, noise=0.01))
+        r = c.cluster()
+        assert r["n_clusters"] == 1
+        assert r["n_noise"] == 0
+
+    def test_all_different_people_noise(self, temp_db):
+        """Many orthogonal-ish faces should remain noise with min_samples=2."""
+        c = FaceClusterer(db_path=temp_db, eps=0.4, min_samples=2)
+        for i in range(10):
+            c.store_embedding(f"f{i}", f"/{i}.jpg", 0, _make_embedding(i * 7))
+        r = c.cluster()
+        assert r["n_clusters"] == 0
+        assert r["n_noise"] == 10
+
+    def test_duplicate_embeddings_cluster(self, temp_db):
+        """Identical embeddings should be one cluster."""
+        c = FaceClusterer(db_path=temp_db, eps=0.4, min_samples=2)
+        emb = _make_embedding(1)
+        for i in range(3):
+            c.store_embedding(f"f{i}", f"/{i}.jpg", 0, emb)
+        r = c.cluster()
+        assert r["n_clusters"] == 1
+        assert r["n_noise"] == 0
 
 
 # ─── Scan Integration ───
@@ -448,6 +617,32 @@ class TestScanIntegration:
         ]
         cluster_faces_from_scan(scan, db_path=temp_db)
         assert scan[0]["faces_detected"][0]["cluster_label"] == "Unknown_Person_1"
+        assert scan[1]["faces_detected"][0]["cluster_label"] == "Unknown_Person_1"
+
+    def test_cluster_label_indexed_by_face_index(self, temp_db):
+        """Multiple faces per image should map labels by face_index, not position."""
+        base1 = _make_embedding(1)
+        base2 = _make_embedding(99)
+        # Add third face that is similar to base1 (so base1 cluster has 2 members)
+        similar1 = _make_similar_embedding(base1, noise=0.001)
+        scan = [
+            {"file_id": "f1", "filename": "group.jpg", "path": "/group.jpg",
+             "extension": ".jpg",
+             "faces_detected": [
+                 {"bbox": [0, 0, 50, 50], "confidence": 0.9, "embedding": base1},
+                 {"bbox": [60, 60, 120, 120], "confidence": 0.85, "embedding": base2},
+             ]},
+            {"file_id": "f2", "filename": "solo.jpg", "path": "/solo.jpg",
+             "extension": ".jpg",
+             "faces_detected": [
+                 {"bbox": [0, 0, 50, 50], "confidence": 0.9, "embedding": similar1},
+             ]},
+        ]
+        cluster_faces_from_scan(scan, db_path=temp_db)
+        # f1 face 0 (base1) is in Unknown_Person_1, face 1 (base2) is noise
+        assert scan[0]["faces_detected"][0]["cluster_label"] == "Unknown_Person_1"
+        assert scan[0]["faces_detected"][1].get("cluster_label") is None
+        # f2 face 0 (similar1) is also in Unknown_Person_1
         assert scan[1]["faces_detected"][0]["cluster_label"] == "Unknown_Person_1"
 
     def test_cluster_preserves_scan_fields(self, temp_db):

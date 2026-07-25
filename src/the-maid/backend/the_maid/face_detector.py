@@ -8,12 +8,22 @@ from pathlib import Path
 from typing import List, Dict, Any, Optional
 
 import numpy as np
+import math
 
 # Image extensions eligible for face detection
-IMAGE_EXTENSIONS = {".jpg", ".jpeg", ".png", ".bmp", ".webp", ".heic"}
+# Note: HEIC/HEIF/AVIF support depends on OS/PIL codec availability at runtime.
+IMAGE_EXTENSIONS = {
+    ".jpg", ".jpeg", ".png", ".bmp", ".webp", ".heic", ".heif",
+    ".gif", ".tiff", ".tif", ".avif", ".raw",
+}
 
 # 128D ArcFace embedding vector
 EMBEDDING_DIM = 128
+
+
+def _is_finite(value: float) -> bool:
+    """Return True if value is a finite real number."""
+    return math.isfinite(value)
 
 
 class FaceDetector:
@@ -103,10 +113,31 @@ class FaceDetector:
         for face in faces:
             bbox = face.bbox.tolist() if hasattr(face.bbox, "tolist") else list(face.bbox)
             embedding = face.normed_embedding.tolist() if hasattr(face.normed_embedding, "tolist") else list(face.normed_embedding)
+
+            # Validate embedding shape and values — bad model outputs should not propagate
+            if len(embedding) != EMBEDDING_DIM:
+                self._error = f"Invalid embedding dimension for {image_path}: got {len(embedding)}, expected {EMBEDDING_DIM}"
+                continue
+            if not all(_is_finite(v) for v in embedding):
+                self._error = f"Invalid embedding values for {image_path}: non-finite float"
+                continue
+
+            confidence = float(face.det_score)
+            if not _is_finite(confidence) or confidence < 0 or confidence > 1:
+                self._error = f"Invalid confidence for {image_path}: {confidence}"
+                continue
+
+            # Normalize bbox to [x1, y1, x2, y2] with x1 < x2 and y1 < y2
+            x1, y1, x2, y2 = bbox
+            if x1 > x2:
+                x1, x2 = x2, x1
+            if y1 > y2:
+                y1, y2 = y2, y1
+
             results.append({
-                "bbox": [round(c, 2) for c in bbox],
+                "bbox": [round(x1, 2), round(y1, 2), round(x2, 2), round(y2, 2)],
                 "embedding": embedding,
-                "confidence": float(face.det_score),
+                "confidence": confidence,
             })
         return results
 
@@ -162,8 +193,19 @@ def detect_faces_for_scan(
     # Filter to image files only
     image_files = [f for f in scan_results if f.get("extension", "").lower() in IMAGE_EXTENSIONS]
 
-    # Batch detect
-    face_map = face_detector.detect_faces_batch([f["path"] for f in image_files])
+    # Batch detect — protect the whole scan from a single bad image/model failure
+    face_map: Dict[str, List[Dict[str, Any]]]
+    try:
+        face_map = face_detector.detect_faces_batch([f["path"] for f in image_files])
+    except Exception as e:
+        # Graceful degradation: log error and leave faces_detected empty for all files
+        error_msg = f"Batch face detection failed: {e}"
+        try:
+            face_detector._error = error_msg
+        except AttributeError:
+            # Mock or external detector may not expose _error
+            pass
+        face_map = {}
 
     for f in scan_results:
         faces = face_map.get(f["path"], [])

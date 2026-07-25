@@ -6,7 +6,7 @@ Unknown_Person_N labels assigned sequentially.
 """
 
 import sqlite3
-import json
+import math
 from pathlib import Path
 from typing import List, Dict, Any, Optional, Tuple
 
@@ -15,6 +15,9 @@ import numpy as np
 # Default DBSCAN params (can be overridden via settings)
 DEFAULT_EPS = 0.4        # cosine distance threshold (ArcFace embeddings are normalized)
 DEFAULT_MIN_SAMPLES = 2  # minimum faces to form a cluster
+
+# 128D ArcFace embedding vector
+EMBEDDING_DIM = 128
 
 # Schema version for migrations
 DB_SCHEMA_VERSION = 1
@@ -65,7 +68,9 @@ def _dbscan(eps: float, min_samples: int, dist_matrix: np.ndarray) -> List[int]:
     if n == 0:
         return []
     if n == 1:
-        return [-1]  # single point is noise
+        # A single point's neighborhood is itself (distance 0), so it forms a
+        # cluster when min_samples <= 1; otherwise it is noise.
+        return [0] if min_samples <= 1 else [-1]
 
     labels = np.full(n, -1, dtype=int)  # -1 = unvisited/noise
     cluster_id = 0
@@ -76,7 +81,7 @@ def _dbscan(eps: float, min_samples: int, dist_matrix: np.ndarray) -> List[int]:
             continue
         visited[i] = True
 
-        # Find neighbors
+        # Find neighbors (include self via the zero diagonal)
         neighbors = np.where(dist_matrix[i] <= eps)[0]
 
         if len(neighbors) < min_samples:
@@ -89,17 +94,38 @@ def _dbscan(eps: float, min_samples: int, dist_matrix: np.ndarray) -> List[int]:
 
         while seed:
             j = seed.pop(0)
+            if labels[j] == -1:
+                labels[j] = cluster_id
             if not visited[j]:
                 visited[j] = True
                 j_neighbors = np.where(dist_matrix[j] <= eps)[0]
                 if len(j_neighbors) >= min_samples:
-                    seed.extend(j_neighbors.tolist())
-            if labels[j] == -1:
-                labels[j] = cluster_id
+                    # Core point: extend seed with neighbors not already in seed
+                    for nb in j_neighbors:
+                        if nb not in seed:
+                            seed.append(nb)
+                else:
+                    # Border point: still add its unvisited neighbors within eps so density-reachable
+                    # points beyond the immediate core neighborhood get discovered.
+                    for nb in j_neighbors:
+                        if not visited[nb] and nb not in seed:
+                            seed.append(nb)
 
         cluster_id += 1
 
     return labels.tolist()
+
+
+def _is_finite(value: float) -> bool:
+    """Return True if value is a finite real number."""
+    return math.isfinite(value)
+
+
+def _validate_embedding(embedding: List[float]) -> bool:
+    """Return True if embedding has correct dimension and all finite values."""
+    if len(embedding) != EMBEDDING_DIM:
+        return False
+    return all(_is_finite(v) for v in embedding)
 
 
 class FaceClusterer:
@@ -127,6 +153,12 @@ class FaceClusterer:
                         embedding: List[float], confidence: float = 0.0) -> int:
         """Store a single face embedding. Returns the row ID."""
         emb_arr = np.array(embedding, dtype=np.float32)
+        if emb_arr.shape != (EMBEDDING_DIM,):
+            raise ValueError(
+                f"Embedding must be {EMBEDDING_DIM}D, got shape {emb_arr.shape}"
+            )
+        if not np.all(np.isfinite(emb_arr)):
+            raise ValueError("Embedding contains non-finite values (NaN/Inf)")
         with sqlite3.connect(self.db_path) as conn:
             cur = conn.execute(
                 "INSERT INTO embeddings (file_id, file_path, face_index, embedding, confidence) "
@@ -139,12 +171,17 @@ class FaceClusterer:
         """
         Store multiple face embeddings from scan results.
         faces: list of dicts with file_id, file_path, face_index, embedding, confidence.
+        Invalid embeddings are skipped silently so one bad face does not break a batch.
         Returns count stored.
         """
         count = 0
         with sqlite3.connect(self.db_path) as conn:
             for f in faces:
                 emb_arr = np.array(f["embedding"], dtype=np.float32)
+                if emb_arr.shape != (EMBEDDING_DIM,):
+                    continue
+                if not np.all(np.isfinite(emb_arr)):
+                    continue
                 conn.execute(
                     "INSERT INTO embeddings (file_id, file_path, face_index, embedding, confidence) "
                     "VALUES (?, ?, ?, ?, ?)",
@@ -196,6 +233,17 @@ class FaceClusterer:
             return {"n_clusters": 0, "n_noise": 0, "labels": {}}
 
         if len(vectors) == 1:
+            # Single face: cluster if eps allows, otherwise noise.
+            # Since self-distance is zero, it always satisfies min_samples when min_samples == 1.
+            if self.min_samples <= 1:
+                cid = 0
+                clabel = "Unknown_Person_1"
+                with sqlite3.connect(self.db_path) as conn:
+                    conn.execute(
+                        "UPDATE embeddings SET cluster_id = ?, cluster_label = ? WHERE id = ?",
+                        (cid, clabel, metadata[0]["row_id"])
+                    )
+                return {"n_clusters": 1, "n_noise": 0, "labels": {metadata[0]["row_id"]: clabel}}
             # Single face = noise
             with sqlite3.connect(self.db_path) as conn:
                 conn.execute(
@@ -210,12 +258,44 @@ class FaceClusterer:
         # Run DBSCAN
         raw_labels = _dbscan(self.eps, self.min_samples, dist)
 
-        # Assign Unknown_Person_N labels to clusters (sorted by first appearance)
-        cluster_order = []  # track first-seen order
-        label_map = {}  # cluster_id -> "Unknown_Person_N"
+        # Assign Unknown_Person_N labels to clusters (sorted by first appearance).
+        # Preserve already-named labels: if all rows for a cluster share a custom
+        # (non-Unknown_Person_*) label, keep it. Otherwise assign next free
+        # Unknown_Person_N number.
+        label_map: Dict[int, str] = {}
+        existing_named: Dict[int, set[str]] = {}
+
+        # Read current DB labels grouped by cluster_id.
+        # We are about to overwrite cluster_id, so we use the old cluster_id from
+        # the previous run to detect preserved names.
+        if metadata:
+            with sqlite3.connect(self.db_path) as conn:
+                cur = conn.execute(
+                    "SELECT cluster_id, cluster_label FROM embeddings WHERE cluster_id >= 0"
+                )
+                for cid, clabel in cur.fetchall():
+                    existing_named.setdefault(cid, set())
+                    if clabel:
+                        existing_named[cid].add(clabel)
+
         for label in raw_labels:
-            if label >= 0 and label not in label_map:
-                label_map[label] = f"Unknown_Person_{len(label_map) + 1}"
+            if label < 0 or label in label_map:
+                continue
+            # If every previous label for this cluster was identical and custom, reuse it.
+            preserved = None
+            prev_labels = existing_named.get(label, set())
+            if len(prev_labels) == 1:
+                prev = next(iter(prev_labels))
+                if not prev.startswith("Unknown_Person_"):
+                    preserved = prev
+            if preserved:
+                label_map[label] = preserved
+            else:
+                # Next free Unknown_Person_N number.
+                n = 1
+                while f"Unknown_Person_{n}" in label_map.values():
+                    n += 1
+                label_map[label] = f"Unknown_Person_{n}"
 
         # Update DB
         labels_result = {}

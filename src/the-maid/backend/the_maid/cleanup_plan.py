@@ -8,7 +8,7 @@ import hashlib
 import re
 from dataclasses import dataclass, field, asdict
 from pathlib import Path
-from typing import List, Optional
+from typing import Any, Dict, List, Optional
 
 SCHEMA_VERSION = "1.0.0"
 
@@ -28,7 +28,7 @@ class CleanupItem:
     proposed_action: str                # move | copy | tag | delete | rename
     proposed_path: str                  # absolute destination path (same as current_path for tag/delete)
     proposed_tags: List[str] = field(default_factory=list)   # IPTC/XMP tags to write
-    faces_detected: List[str] = field(default_factory=list) # face cluster IDs, empty if none
+    faces_detected: List[Dict[str, Any]] = field(default_factory=list) # face detection results per ADR 0006/0009
     rationale: str = ""                 # LLM explanation for this proposal
     confidence: float = 0.0             # 0.0-1.0
     user_edited_path: Optional[str] = None  # ADR 0005: inline edit override

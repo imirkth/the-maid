@@ -38,12 +38,21 @@ export default function FaceClusterView() {
   const submitRename = async (clusterId: number) => {
     const name = editValue.trim();
     if (!name) return;
+    if (name.length > 100) {
+      setError("Name too long (max 100 characters)");
+      return;
+    }
+    setError(null);
     setRenameStatus(null);
     try {
       const result = await invoke<RenameResult>("rename_face_cluster", {
         clusterId,
         newLabel: name,
       });
+      if (!result.success) {
+        setError(`Rename failed: ${result.errors.join(", ")}`);
+        return;
+      }
       setRenameStatus(
         `Renamed "${name}": ${result.tagged} tagged, ${result.skipped} skipped` +
         (result.errors.length ? `, ${result.errors.length} errors` : "")

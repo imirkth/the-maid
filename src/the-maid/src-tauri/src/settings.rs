@@ -12,6 +12,7 @@ pub struct Settings {
     pub buckets: Vec<BucketEntry>,
     pub features: FeatureFlags,
     pub setup_complete: bool,
+    pub face_cluster: FaceClusterSettings,
 }
 
 #[derive(Serialize, Deserialize, Debug, Clone, Default)]
@@ -19,6 +20,21 @@ pub struct FeatureFlags {
     pub pdf_ocr: bool,
     pub face_clustering: bool,
     pub general_files: bool,
+}
+
+#[derive(Serialize, Deserialize, Debug, Clone, Default)]
+pub struct FaceClusterSettings {
+    pub eps: f64,
+    pub min_samples: usize,
+}
+
+impl FaceClusterSettings {
+    pub fn new() -> Self {
+        FaceClusterSettings {
+            eps: 0.4,
+            min_samples: 2,
+        }
+    }
 }
 
 #[derive(Serialize, Deserialize, Debug, Clone, Default)]
@@ -37,6 +53,7 @@ impl Settings {
             buckets: vec![],
             features: FeatureFlags::default(),
             setup_complete: false,
+            face_cluster: FaceClusterSettings::new(),
         }
     }
 
@@ -46,10 +63,9 @@ impl Settings {
         if !path.exists() {
             return Ok(Self::new());
         }
-        let data = fs::read_to_string(&path)
-            .map_err(|e| format!("Failed to read settings: {}", e))?;
-        serde_json::from_str(&data)
-            .map_err(|e| format!("Failed to parse settings: {}", e))
+        let data =
+            fs::read_to_string(&path).map_err(|e| format!("Failed to read settings: {}", e))?;
+        serde_json::from_str(&data).map_err(|e| format!("Failed to parse settings: {}", e))
     }
 
     /// Save settings to ~/.the-maid/settings.json.
@@ -61,8 +77,7 @@ impl Settings {
         }
         let data = serde_json::to_string_pretty(self)
             .map_err(|e| format!("Failed to serialize settings: {}", e))?;
-        fs::write(&path, data)
-            .map_err(|e| format!("Failed to write settings: {}", e))
+        fs::write(&path, data).map_err(|e| format!("Failed to write settings: {}", e))
     }
 
     /// Mark first run complete.
@@ -78,7 +93,11 @@ impl Settings {
 
     /// Set feature flags from setup wizard.
     pub fn set_features(&mut self, pdf_ocr: bool, face_clustering: bool, general_files: bool) {
-        self.features = FeatureFlags { pdf_ocr, face_clustering, general_files };
+        self.features = FeatureFlags {
+            pdf_ocr,
+            face_clustering,
+            general_files,
+        };
     }
 
     /// Add a sandbox folder if not already present.
@@ -135,11 +154,8 @@ mod tests {
 
     fn setup_temp_settings() -> PathBuf {
         let count = TEST_COUNTER.fetch_add(1, Ordering::SeqCst);
-        let tmp = std::env::temp_dir().join(format!(
-            "the-maid-test-{}-{}",
-            std::process::id(),
-            count
-        ));
+        let tmp =
+            std::env::temp_dir().join(format!("the-maid-test-{}-{}", std::process::id(), count));
         // Clean up any leftover from previous run
         std::fs::remove_dir_all(&tmp).ok();
         std::fs::create_dir_all(&tmp).unwrap();
@@ -214,6 +230,27 @@ mod tests {
         settings.complete_setup();
         assert!(settings.setup_complete);
         assert!(!settings.first_run);
+    }
+
+    #[test]
+    fn test_face_cluster_defaults() {
+        let settings = Settings::new();
+        assert!((settings.face_cluster.eps - 0.4).abs() < f64::EPSILON);
+        assert_eq!(settings.face_cluster.min_samples, 2);
+    }
+
+    #[test]
+    fn test_face_cluster_roundtrip() {
+        let tmp = setup_temp_settings();
+        let mut settings = Settings::load().unwrap();
+        settings.face_cluster.eps = 0.25;
+        settings.face_cluster.min_samples = 5;
+        settings.save().unwrap();
+
+        let loaded = Settings::load().unwrap();
+        assert!((loaded.face_cluster.eps - 0.25).abs() < f64::EPSILON);
+        assert_eq!(loaded.face_cluster.min_samples, 5);
+        std::fs::remove_dir_all(&tmp).ok();
     }
 
     #[test]

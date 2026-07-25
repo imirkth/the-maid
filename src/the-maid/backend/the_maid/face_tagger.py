@@ -12,6 +12,9 @@ from typing import List, Dict, Any, Optional
 from .face_cluster import FaceClusterer
 
 
+MAX_LABEL_LENGTH = 100
+
+
 def _exiftool_available() -> bool:
     """Check if exiftool binary is on PATH."""
     return shutil.which("exiftool") is not None
@@ -20,6 +23,7 @@ def _exiftool_available() -> bool:
 def _write_xmp_tag(file_path: str, tag_name: str, tag_value: str) -> bool:
     """
     Write a single XMP tag to a file using exiftool.
+    tag_name should be the full qualified tag, e.g. "XMP:PersonInImage".
     Returns True on success, False on failure.
     """
     if not _exiftool_available():
@@ -31,7 +35,7 @@ def _write_xmp_tag(file_path: str, tag_name: str, tag_value: str) -> bool:
     try:
         result = subprocess.run(
             ["exiftool", "-overwrite_original",
-             f"-XMP:PersonInImage={tag_value}", file_path],
+             f"-XMP:{tag_name}={tag_value}", file_path],
             capture_output=True, text=True, timeout=30
         )
         return result.returncode == 0
@@ -39,8 +43,8 @@ def _write_xmp_tag(file_path: str, tag_name: str, tag_value: str) -> bool:
         return False
 
 
-def _clear_xmp_tag(file_path: str) -> bool:
-    """Clear XMP:PersonInImage from a file."""
+def _clear_xmp_tag(file_path: str, tag_name: str = "PersonInImage") -> bool:
+    """Clear a single XMP tag from a file."""
     if not _exiftool_available():
         return False
     if not _file_exists(file_path):
@@ -48,7 +52,7 @@ def _clear_xmp_tag(file_path: str) -> bool:
     try:
         result = subprocess.run(
             ["exiftool", "-overwrite_original",
-             "-XMP:PersonInImage=", file_path],
+             f"-XMP:{tag_name}=", file_path],
             capture_output=True, text=True, timeout=30
         )
         return result.returncode == 0
@@ -59,6 +63,17 @@ def _clear_xmp_tag(file_path: str) -> bool:
 def _file_exists(file_path: str) -> bool:
     """Check if file exists. Separated for mocking."""
     return Path(file_path).exists()
+
+
+def _sanitize_label(label: str) -> str:
+    """
+    Strip leading/trailing whitespace and clamp label length.
+    Returns empty string if label is only whitespace.
+    """
+    cleaned = label.strip()
+    if not cleaned:
+        return ""
+    return cleaned[:MAX_LABEL_LENGTH]
 
 
 def rename_cluster_with_tags(
@@ -80,8 +95,12 @@ def rename_cluster_with_tags(
     """
     from .sandbox import validate_path
 
+    sanitized = _sanitize_label(new_label)
+    if not sanitized:
+        return {"renamed": 0, "tagged": 0, "skipped": 0, "errors": ["Cluster label cannot be empty"], "success": False}
+
     # Update SQLite label
-    renamed_count = clusterer.rename_cluster(cluster_id, new_label)
+    renamed_count = clusterer.rename_cluster(cluster_id, sanitized)
 
     # Get all file paths in this cluster
     clusters = clusterer.get_clusters()
@@ -92,7 +111,7 @@ def rename_cluster_with_tags(
             break
 
     if target is None:
-        return {"renamed": 0, "tagged": 0, "skipped": 0, "errors": ["Cluster not found"]}
+        return {"renamed": 0, "tagged": 0, "skipped": 0, "errors": ["Cluster not found"], "success": False}
 
     tagged = 0
     skipped = 0
@@ -110,7 +129,7 @@ def rename_cluster_with_tags(
                 errors.append(f"Outside sandbox: {file_path}")
                 continue
 
-        if _write_xmp_tag(file_path, "PersonInImage", new_label):
+        if _write_xmp_tag(file_path, "XMP:PersonInImage", sanitized):
             tagged += 1
         else:
             skipped += 1
@@ -126,6 +145,7 @@ def rename_cluster_with_tags(
         "tagged": tagged,
         "skipped": skipped,
         "errors": errors,
+        "success": tagged > 0 or len(target["faces"]) == 0,
     }
 
 

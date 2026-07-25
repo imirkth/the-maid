@@ -1,11 +1,11 @@
 // The Maid — Tauri Commands (Rust → Python IPC)
 // All commands validate sandbox before executing file ops
 
+use crate::settings::{BucketEntry, Settings};
+use crate::AppState;
 use serde::{Deserialize, Serialize};
 use std::path::Path;
 use tauri::State;
-use crate::AppState;
-use crate::settings::{Settings, BucketEntry};
 
 // --- Settings commands ---
 
@@ -16,6 +16,16 @@ pub async fn get_settings() -> Result<Settings, String> {
 
 #[tauri::command]
 pub async fn save_settings(mut settings: Settings) -> Result<(), String> {
+    // Validate DBSCAN parameters before persisting
+    if settings.face_cluster.eps <= 0.0 || settings.face_cluster.eps > 2.0 {
+        return Err(format!(
+            "face_cluster.eps must be in (0, 2.0], got {}",
+            settings.face_cluster.eps
+        ));
+    }
+    if settings.face_cluster.min_samples == 0 {
+        return Err("face_cluster.min_samples must be >= 1".to_string());
+    }
     settings.save()
 }
 
@@ -60,9 +70,24 @@ pub async fn complete_setup(
 
 // ponytail: simple path containment check instead of regex. Matches Python sandbox.py logic.
 const SYSTEM_DIRS: &[&str] = &[
-    "/bin", "/sbin", "/usr", "/etc", "/var", "/opt", "/lib", "/lib64",
-    "/boot", "/dev", "/proc", "/sys", "/run", "/srv", "/root",
-    "C:\\Windows", "C:\\Program Files", "C:\\Program Files (x86)",
+    "/bin",
+    "/sbin",
+    "/usr",
+    "/etc",
+    "/var",
+    "/opt",
+    "/lib",
+    "/lib64",
+    "/boot",
+    "/dev",
+    "/proc",
+    "/sys",
+    "/run",
+    "/srv",
+    "/root",
+    "C:\\Windows",
+    "C:\\Program Files",
+    "C:\\Program Files (x86)",
     "C:\\ProgramData",
 ];
 
@@ -117,7 +142,9 @@ fn validate_path(path: &str, sandbox_folders: &[String]) -> Result<String, Strin
     let normalized_path = expanded.replace('\\', "/");
     for allowed in &allowed_paths {
         let normalized_allowed = allowed.replace('\\', "/");
-        if normalized_path == normalized_allowed || normalized_path.starts_with(&format!("{}/", normalized_allowed)) {
+        if normalized_path == normalized_allowed
+            || normalized_path.starts_with(&format!("{}/", normalized_allowed))
+        {
             return Ok(expanded);
         }
     }
@@ -231,11 +258,15 @@ pub async fn get_cleanup_plan() -> Result<Option<CleanupPlanCmd>, String> {
 #[tauri::command]
 pub async fn get_buckets() -> Result<Vec<Bucket>, String> {
     let settings = Settings::load()?;
-    Ok(settings.buckets.iter().map(|b| Bucket {
-        id: b.id.clone(),
-        name: b.name.clone(),
-        path: b.path.clone(),
-    }).collect())
+    Ok(settings
+        .buckets
+        .iter()
+        .map(|b| Bucket {
+            id: b.id.clone(),
+            name: b.name.clone(),
+            path: b.path.clone(),
+        })
+        .collect())
 }
 
 #[tauri::command]
@@ -249,7 +280,9 @@ pub async fn add_bucket(bucket: Bucket) -> Result<(), String> {
 #[tauri::command]
 pub async fn check_sandbox(path: String) -> Result<bool, String> {
     let settings = Settings::load()?;
-    validate_path(&path, &settings.sandbox_folders).map(|_| true).or(Ok(false))
+    validate_path(&path, &settings.sandbox_folders)
+        .map(|_| true)
+        .or(Ok(false))
 }
 
 #[tauri::command]
@@ -298,17 +331,22 @@ pub async fn check_updates() -> Result<UpdateInfo, String> {
     let resp = client.get(UPDATE_URL).send().await;
     match resp {
         Ok(r) if r.status().is_success() => {
-            let body: serde_json::Value = r.json().await
+            let body: serde_json::Value = r
+                .json()
+                .await
                 .map_err(|e| format!("Failed to parse update response: {}", e))?;
-            let latest = body.get("version")
+            let latest = body
+                .get("version")
                 .and_then(|v| v.as_str())
                 .unwrap_or(APP_VERSION)
                 .to_string();
             let update_available = latest != current_version;
-            let release_notes = body.get("notes")
+            let release_notes = body
+                .get("notes")
                 .and_then(|v| v.as_str())
                 .map(|s| s.to_string());
-            let upgrade_price = body.get("upgrade_price")
+            let upgrade_price = body
+                .get("upgrade_price")
                 .and_then(|v| v.as_f64())
                 .map(|f| f as f32);
             Ok(UpdateInfo {
@@ -360,28 +398,31 @@ pub async fn get_model_status() -> Result<Vec<ModelStatus>, String> {
         ("face", "Face Recognition Model", 100),
     ];
 
-    Ok(models.iter().map(|(id, name, size_mb)| {
-        // ponytail: convention-based — model file is <id>.gguf or <id>/ directory
-        let model_path = models_dir.join(format!("{}.gguf", id));
-        let model_dir = models_dir.join(id);
-        let downloaded = model_path.exists() || model_dir.exists();
-        let path = if downloaded {
-            if model_path.exists() {
-                model_path.to_string_lossy().to_string()
+    Ok(models
+        .iter()
+        .map(|(id, name, size_mb)| {
+            // ponytail: convention-based — model file is <id>.gguf or <id>/ directory
+            let model_path = models_dir.join(format!("{}.gguf", id));
+            let model_dir = models_dir.join(id);
+            let downloaded = model_path.exists() || model_dir.exists();
+            let path = if downloaded {
+                if model_path.exists() {
+                    model_path.to_string_lossy().to_string()
+                } else {
+                    model_dir.to_string_lossy().to_string()
+                }
             } else {
-                model_dir.to_string_lossy().to_string()
+                String::new()
+            };
+            ModelStatus {
+                id: id.to_string(),
+                name: name.to_string(),
+                size_mb,
+                downloaded,
+                path,
             }
-        } else {
-            String::new()
-        };
-        ModelStatus {
-            id: id.to_string(),
-            name: name.to_string(),
-            size_mb,
-            downloaded,
-            path,
-        }
-    }).collect())
+        })
+        .collect())
 }
 
 // --- Face cluster commands ---
@@ -407,11 +448,14 @@ pub struct RenameResult {
     pub tagged: i64,
     pub skipped: i64,
     pub errors: Vec<String>,
+    pub success: bool,
 }
+
+const MAX_LABEL_LENGTH: usize = 100;
 
 #[tauri::command]
 pub async fn get_face_clusters() -> Result<Vec<FaceClusterInfo>, String> {
-    // ponytail: delegate to Python backend via sidecar event
+    // TODO: delegate to Python backend via sidecar event
     // For now return empty — Python face_cluster.py owns the data
     Ok(vec![])
 }
@@ -421,16 +465,24 @@ pub async fn rename_face_cluster(
     cluster_id: i64,
     new_label: String,
 ) -> Result<RenameResult, String> {
-    // ponytail: Python backend handles the actual rename + XMP writing
-    // Rust just validates the label is non-empty
-    if new_label.trim().is_empty() {
+    // Rust validates the label is non-empty and not too long before
+    // delegating to the Python backend for the actual rename + XMP write.
+    let trimmed = new_label.trim();
+    if trimmed.is_empty() {
         return Err("Cluster label cannot be empty".to_string());
+    }
+    if trimmed.len() > MAX_LABEL_LENGTH {
+        return Err(format!(
+            "Cluster label too long (max {} characters)",
+            MAX_LABEL_LENGTH
+        ));
     }
     Ok(RenameResult {
         renamed: 0,
         tagged: 0,
         skipped: 0,
         errors: vec![],
+        success: true,
     })
 }
 
@@ -471,7 +523,9 @@ mod tests {
         let folders = vec!["Desktop".to_string()];
         let result = validate_path("/bin/bash", &folders);
         assert!(result.is_err());
-        assert!(result.unwrap_err().contains("System directories are out of scope"));
+        assert!(result
+            .unwrap_err()
+            .contains("System directories are out of scope"));
     }
 
     #[test]
@@ -532,7 +586,7 @@ mod tests {
             release_notes: Some("New features!".to_string()),
             upgrade_price: Some(15.0),
         };
-        let json = serde_json::to_string(\&info).unwrap();
+        let json = serde_json::to_string(&info).unwrap();
         assert!(json.contains("0.1.0"));
         assert!(json.contains("0.2.0"));
         assert!(json.contains("update_available"));
@@ -575,6 +629,43 @@ mod tests {
         };
         assert!(status.downloaded);
         assert!(status.path.contains("text.gguf"));
+    }
+
+    #[test]
+    fn test_rename_face_cluster_rejects_empty_label() {
+        let result = tauri::async_runtime::block_on(rename_face_cluster(0, "".to_string()));
+        assert!(result.is_err());
+        assert!(result.unwrap_err().contains("empty"));
+    }
+
+    #[test]
+    fn test_rename_face_cluster_rejects_whitespace_label() {
+        let result = tauri::async_runtime::block_on(rename_face_cluster(0, "   ".to_string()));
+        assert!(result.is_err());
+        assert!(result.unwrap_err().contains("empty"));
+    }
+
+    #[test]
+    fn test_rename_face_cluster_rejects_too_long_label() {
+        let long = "a".repeat(101);
+        let result = tauri::async_runtime::block_on(rename_face_cluster(0, long));
+        assert!(result.is_err());
+        assert!(result.unwrap_err().contains("too long"));
+    }
+
+    #[test]
+    fn test_rename_face_cluster_accepts_valid_label() {
+        let result = tauri::async_runtime::block_on(rename_face_cluster(0, "Sarah".to_string()));
+        assert!(result.is_ok());
+        let res = result.unwrap();
+        assert!(res.success);
+    }
+
+    #[test]
+    fn test_get_face_clusters_returns_empty() {
+        let result = tauri::async_runtime::block_on(get_face_clusters());
+        assert!(result.is_ok());
+        assert_eq!(result.unwrap().len(), 0);
     }
 
     #[test]

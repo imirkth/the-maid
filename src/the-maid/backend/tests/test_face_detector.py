@@ -11,6 +11,8 @@ from pathlib import Path
 from unittest.mock import MagicMock, patch
 from typing import List
 
+import numpy as np
+
 from the_maid.face_detector import (
     FaceDetector,
     detect_faces_for_scan,
@@ -198,6 +200,106 @@ class TestMockedDetection:
         assert faces[0]["confidence"] == 0.9
         assert faces[1]["confidence"] == 0.8
 
+    def test_detect_faces_uppercase_extension(self, fake_image):
+        """Uppercase extension should still be recognized as image."""
+        mock_face = _make_mock_face(
+            bbox=[10, 20, 100, 120],
+            embedding=[0.1] * EMBEDDING_DIM,
+            score=0.95,
+        )
+        mock_app = MagicMock()
+        mock_app.get.return_value = [mock_face]
+
+        detector = FaceDetector()
+        detector._available = True
+        detector._FaceAnalysis = MagicMock(return_value=mock_app)
+
+        uppercase_path = fake_image.replace(".jpg", ".JPG")
+        Path(fake_image).rename(uppercase_path)
+
+        with patch("PIL.Image.open") as mock_open:
+            mock_open.return_value.convert.return_value = MagicMock()
+            faces = detector.detect_faces(uppercase_path)
+
+        assert len(faces) == 1
+        assert faces[0]["bbox"] == [10.0, 20.0, 100.0, 120.0]
+
+    def test_detect_faces_corrupt_image(self, fake_image):
+        """Corrupt/unreadable image returns empty list and records error."""
+        detector = FaceDetector()
+        detector._available = True
+        detector._FaceAnalysis = MagicMock(return_value=MagicMock())
+
+        with patch("PIL.Image.open", side_effect=OSError("cannot identify image")):
+            faces = detector.detect_faces(fake_image)
+
+        assert faces == []
+        assert "cannot identify image" in (detector.error or "")
+
+    def test_detect_faces_invalid_embedding_dimension(self, fake_image):
+        """Face with wrong embedding dimension is skipped."""
+        face = MagicMock()
+        face.bbox = np.array([0, 0, 10, 10])
+        face.normed_embedding = np.array([0.1] * 64)  # not 128
+        face.det_score = 0.95
+
+        mock_app = MagicMock()
+        mock_app.get.return_value = [face]
+
+        detector = FaceDetector()
+        detector._available = True
+        detector._FaceAnalysis = MagicMock(return_value=mock_app)
+
+        with patch("PIL.Image.open") as mock_open:
+            mock_open.return_value.convert.return_value = MagicMock()
+            faces = detector.detect_faces(fake_image)
+
+        assert faces == []
+        assert "Invalid embedding dimension" in (detector.error or "")
+
+    def test_detect_faces_non_finite_embedding(self, fake_image):
+        """Face with NaN/Inf embedding is skipped."""
+        face = MagicMock()
+        face.bbox = np.array([0, 0, 10, 10])
+        face.normed_embedding = np.array([float("nan")] + [0.1] * 127)
+        face.det_score = 0.95
+
+        mock_app = MagicMock()
+        mock_app.get.return_value = [face]
+
+        detector = FaceDetector()
+        detector._available = True
+        detector._FaceAnalysis = MagicMock(return_value=mock_app)
+
+        with patch("PIL.Image.open") as mock_open:
+            mock_open.return_value.convert.return_value = MagicMock()
+            faces = detector.detect_faces(fake_image)
+
+        assert faces == []
+        assert "Invalid embedding values" in (detector.error or "")
+
+    def test_detect_faces_multiple_bbox_format(self, fake_image):
+        """Multiple faces preserve bbox [x1, y1, x2, y2] format."""
+        mock_faces = [
+            _make_mock_face([0, 0, 50, 50], [0.1] * EMBEDDING_DIM, 0.9),
+            _make_mock_face([60, 60, 120, 120], [0.2] * EMBEDDING_DIM, 0.8),
+        ]
+
+        mock_app = MagicMock()
+        mock_app.get.return_value = mock_faces
+
+        detector = FaceDetector()
+        detector._available = True
+        detector._FaceAnalysis = MagicMock(return_value=mock_app)
+
+        with patch("PIL.Image.open") as mock_open:
+            mock_open.return_value.convert.return_value = MagicMock()
+            faces = detector.detect_faces(fake_image)
+
+        assert len(faces) == 2
+        assert faces[0]["bbox"] == [0.0, 0.0, 50.0, 50.0]
+        assert faces[1]["bbox"] == [60.0, 60.0, 120.0, 120.0]
+
     def test_detect_faces_model_error(self, fake_image):
         """Model error returns empty list, sets error message."""
         mock_app = MagicMock()
@@ -267,6 +369,33 @@ class TestScannerIntegration:
         # Text file has no faces
         doc = next(r for r in results if r["filename"] == "notes.txt")
         assert doc["faces_detected"] == []
+
+    def test_detect_faces_for_scan_batch_exception_graceful(self, scan_results_with_images):
+        """If batch detection raises, scan results are still returned with empty faces."""
+        detector = MagicMock()
+        detector.available = True
+        detector.detect_faces_batch.side_effect = RuntimeError("batch boom")
+        detector._error = None
+        type(detector).error = property(lambda self: self._error)
+
+        results = detect_faces_for_scan(scan_results_with_images, face_detector=detector, enabled=True)
+
+        assert isinstance(results, list)
+        assert len(results) == len(scan_results_with_images)
+        for r in results:
+            assert r["faces_detected"] == []
+        assert "batch boom" in (detector.error or "")
+
+    def test_detect_faces_for_scan_preserves_faces_detected_key(self, scan_results_with_images):
+        """Every scan result gets a faces_detected key even when batch fails."""
+        detector = MagicMock()
+        detector.available = True
+        detector.detect_faces_batch.side_effect = RuntimeError("batch boom")
+        detector._error = None
+
+        results = detect_faces_for_scan(scan_results_with_images, face_detector=detector, enabled=True)
+        for r in results:
+            assert "faces_detected" in r
 
     def test_faces_not_added_when_disabled(self, scan_results_with_images):
         """When enabled=False, no faces added even if detector works."""

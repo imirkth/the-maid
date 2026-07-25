@@ -91,6 +91,7 @@ def categorize(scan_results: List[Dict[str, Any]],
         if rule:
             bucket_name = rule["bucket"]
             bucket_path = bucket_map.get(bucket_name)
+            faces_detected = f.get("faces_detected", [])
             if bucket_path:
                 proposed_path = str(Path(bucket_path) / f["filename"])
                 items.append(CleanupItem(
@@ -100,7 +101,7 @@ def categorize(scan_results: List[Dict[str, Any]],
                     proposed_action="move",
                     proposed_path=proposed_path,
                     proposed_tags=list(rule.get("tags", [])),
-                    faces_detected=[],
+                    faces_detected=faces_detected,
                     rationale=rule["rationale"],
                     confidence=rule["confidence"],
                 ))
@@ -123,7 +124,7 @@ def _tag_only_item(f: Dict[str, Any], rationale: str) -> CleanupItem:
         proposed_action="tag",
         proposed_path=f["path"],  # same path for tag-only
         proposed_tags=[],
-        faces_detected=[],
+        faces_detected=f.get("faces_detected", []),
         rationale=rationale,
         confidence=0.0,
     )

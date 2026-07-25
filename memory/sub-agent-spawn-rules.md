@@ -2,6 +2,14 @@
 
 Templates for spawning sub-agents consistently across The Maid project.
 
+## Output Delivery Rule (IMPORTANT)
+
+OpenClaw auto-announce of sub-agent completion is unreliable in this setup. Every sub-agent task prompt MUST end with an explicit fallback instruction:
+
+> Before you finish, send a concise summary of results to the Discord channel `#project-the-maid` (channel id `1529577959503954121`) using the `message` tool with `action=send` and `target="1529577959503954121"`. Do this IN ADDITION to any GitHub issue comment. This ensures the main agent / human sees the result even if auto-announce is silent.
+
+The summary should be 1-3 paragraphs plus a status table. Keep it short enough to fit Discord message limits.
+
 ## Default Coding Sub-Agent
 
 For implementing slices and writing code:
@@ -12,6 +20,7 @@ For implementing slices and writing code:
 - **Timeout:** 3600s (60 min)
 - **Must complete:** Implementation + tests passing before reporting done
 - **Must include in task prompt:** Explicit reference to both skills by name, plus the full skill.md contents pasted in context (agents don't have access to skill files unless we paste them)
+- **Must include in task prompt:** Output Delivery Rule above
 
 ## Auditor Sub-Agent
 
@@ -23,6 +32,7 @@ For auditing code quality and over-engineering:
 - **Timeout:** 3600s
 - **Output:** GitHub issue comment or new issue #14
 - **Scope:** Over-engineering only. Correctness/bugs are separate reviews.
+- **Must include in task prompt:** Output Delivery Rule above
 
 ## Fix Sub-Agent
 
@@ -34,6 +44,7 @@ For fixing audit findings or bugs:
 - **Timeout:** 3600s
 - **Must complete:** Fix all items + tests passing
 - **Must include in task prompt:** Explicit reference to both skills by name, plus the full skill.md contents pasted in context
+- **Must include in task prompt:** Output Delivery Rule above
 
 ## Tester Sub-Agent
 
@@ -46,6 +57,7 @@ For reviewing code for bugs, mishandled cases, and edge cases:
 - **Output:** GitHub issue comment with ranked findings
 - **Scope:** Correctness bugs, mishandled cases, missing edge cases, error handling gaps. NOT over-engineering (that's the auditor).
 - **Must do:** Build a feedback loop, reproduce, minimize, hypothesize, instrument, fix, write regression test. Follow all 6 phases of the diagnosing-bugs skill.
+- **Must include in task prompt:** Output Delivery Rule above
 
 ## White-Hat 1 Sub-Agent
 
@@ -58,6 +70,7 @@ For security auditing (first opinion):
 - **Output:** GitHub issue comment with severity-ranked findings
 - **Scope:** Dependency CVEs, secrets leakage, input validation, auth/authz, infrastructure, logging, data protection. Build attack chains, not isolated findings.
 - **Must do:** Follow all 8 workflow steps (scope → recon → scan → manual review → chain analysis → report → prioritize → re-test). Report by severity: Critical, High, Medium, Low, Info.
+- **Must include in task prompt:** Output Delivery Rule above
 
 ## White-Hat 2 Sub-Agent
 
@@ -70,6 +83,7 @@ For security auditing (second opinion, different model perspective):
 - **Output:** GitHub issue comment with severity-ranked findings
 - **Scope:** Same as White-Hat 1 but independent review. Cross-reference findings with WH1 for consensus.
 - **Must do:** Same workflow as White-Hat 1. Independent analysis — don't just repeat WH1 findings, find what they missed.
+- **Must include in task prompt:** Output Delivery Rule above
 
 ## Quick Reference
 

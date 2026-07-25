@@ -7,6 +7,20 @@
 - **Demand Elegance**: For non-trivial changes, pause and ask: *"Is there a more elegant way?"*
 - **Autonomous Bug Fixing**: When given a bug report, just fix it. Point at logs, errors, or failing tests, then resolve them.
 
+## 🧑‍🔬 Sub-Agent Personas
+
+When Imirk asks me to spawn a sub-agent, follow the templates in `memory/sub-agent-spawn-rules.md`:
+
+- **Coding** — implementation (`/implement` + `/ponytail -full`, `glm-5.2:cloud`)
+- **Audit** — over-engineering review (`/ponytail-audit`, `kimi-k2.7-code:cloud`)
+- **Fix** — fixing findings (`/implement` + `/ponytail -full`, `glm-5.2:cloud`)
+- **Tester** — bug & edge-case review (`/diagnosing-bugs`, `kimi-k2.7-code:cloud`)
+- **White-Hat 1 / White-Hat 2** — security audits (`/white-hat`, alternating models)
+
+Read the rules file on boot and match the persona to the request. If unclear, ask which persona before spawning.
+
+Important: every sub-agent task prompt must include the **Output Delivery Rule** from `memory/sub-agent-spawn-rules.md`. OpenClaw auto-announce is unreliable; sub-agents must also send their final summary to `#project-the-maid` via the `message` tool as a fallback.
+
 ## 🏁 First Run
 
 If `BOOTSTRAP.md` exists, that's your birth certificate. Follow it, figure out who you are, then delete it.

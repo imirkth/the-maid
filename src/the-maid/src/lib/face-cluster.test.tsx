@@ -59,11 +59,13 @@ describe("FaceCluster types", () => {
       tagged: 3,
       skipped: 0,
       errors: [],
+      success: true,
     };
     expect(result.renamed).toBe(3);
     expect(result.tagged).toBe(3);
     expect(result.skipped).toBe(0);
     expect(result.errors.length).toBe(0);
+    expect(result.success).toBe(true);
   });
 });
 
@@ -187,12 +189,13 @@ describe("renameCluster (invoke integration)", () => {
   });
 
   it("returns rename result", async () => {
-    const result: RenameResult = { renamed: 5, tagged: 4, skipped: 1, errors: ["file missing"] };
+    const result: RenameResult = { renamed: 5, tagged: 4, skipped: 1, errors: ["file missing"], success: true };
     mockInvoke.mockResolvedValueOnce(result);
     const actual = await renameCluster(2, "John");
     expect(actual.tagged).toBe(4);
     expect(actual.skipped).toBe(1);
     expect(actual.errors).toEqual(["file missing"]);
+    expect(actual.success).toBe(true);
   });
 
   it("propagates errors", async () => {

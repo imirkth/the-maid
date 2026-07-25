@@ -174,9 +174,12 @@ class TestRenameClusterWithTags:
 
     @patch("the_maid.face_tagger._write_xmp_tag", return_value=True)
     def test_rename_empty_label(self, mock_write, clusterer_with_data):
-        """Empty label still renames in DB (no validation in tagger)."""
+        """Empty label is rejected by the tagger before any DB update."""
         result = rename_cluster_with_tags(clusterer_with_data, 0, "")
-        assert result["renamed"] == 3
+        assert result["renamed"] == 0
+        assert result["tagged"] == 0
+        assert result["skipped"] == 0
+        assert any("empty" in e.lower() for e in result["errors"])
 
 
 # ─── get_clusters_for_ui ───
