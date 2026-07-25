@@ -63,7 +63,19 @@ You wake up fresh each session. Your continuity is maintained exclusively throug
 
 ---
 
-## 🎭 Agent Orchestration
+## Agent skills
+
+### Issue tracker
+
+GitHub Issues at `https://github.com/imirkth/the-maid`. See `docs/agents/issue-tracker.md`.
+
+### Triage labels
+
+Default canonical roles: `needs-triage`, `needs-info`, `ready-for-agent`, `ready-for-human`, `wontfix`. See `docs/agents/triage-labels.md`.
+
+### Domain docs
+
+Single-context layout. `CONTEXT.md` at root + `docs/adr/` for architecture decisions. See `docs/agents/domain.md`.
 
 **Your primary job is to build The Maid, not to spawn subagents.** Focus on:
 - Tauri frontend development

@@ -1,46 +1,19 @@
 # Issue Tracker
 
-The Maid uses a **local markdown issue tracker**.
+The Maid uses **GitHub Issues**.
 
-## How it works
+## Repository
 
-Issues live as markdown files under `.scratch/` in the repo root:
-
-```
-.scratch/
-├── feature-name/
-│   ├── 001-description.md
-│   └── 002-follow-up.md
-└── bug-name/
-    └── 001-report.md
-```
-
-Each issue is a self-contained markdown file with frontmatter:
-
-```markdown
----
-id: 001
-title: "Feature description"
-status: open | in-progress | done
-created: YYYY-MM-DD
-labels: [bug, enhancement, needs-triage, needs-info, ready-for-agent, ready-for-human, wontfix]
----
-
-## Problem
-...
-
-## Solution
-...
-```
+`https://github.com/imirkth/the-maid`
 
 ## Creating issues
 
-Use the `to-issues` skill or create files manually under `.scratch/<feature>/`.
+Use `gh issue create --repo imirkth/the-maid --title "..." --body-file /tmp/issue.md`
 
-## Triage
+## Triage labels
 
-The `/triage` skill reads from `.scratch/` and moves issues through the state machine.
+See `docs/agents/triage-labels.md` for the label vocabulary.
 
 ## PRs as request surface
 
-No — PRs are not tracked as issues. External PRs are evaluated manually.
+No — external PRs are evaluated manually.
