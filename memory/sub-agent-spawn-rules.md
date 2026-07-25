@@ -33,6 +33,53 @@ For fixing audit findings or bugs:
 - **Timeout:** 1800s
 - **Must complete:** Fix all items + tests passing
 
+## Tester Sub-Agent
+
+For reviewing code for bugs, mishandled cases, and edge cases:
+
+- **Model:** `kimi-k2.7-code:cloud`
+- **Skill:** `/diagnosing-bugs`
+- **Context fork:** Yes (needs full codebase state)
+- **Timeout:** 900s (15 min)
+- **Output:** GitHub issue comment with ranked findings
+- **Scope:** Correctness bugs, mishandled cases, missing edge cases, error handling gaps. NOT over-engineering (that's the auditor).
+- **Rule:** FINDER-ONLY. Identify bugs and build ONE minimal failing test per finding. Do NOT execute the full 6-phase fix loop. Hand off fixes to `/fix` subagents.
+- **Rule:** ONE bug pattern per spawn. Never review the whole codebase in one go — scope to a specific file or component.
+
+## Fix Sub-Agent
+
+For fixing findings from tester/auditor:
+
+- **Model:** `glm-5.2:cloud`
+- **Skills:** `/implement` + `/ponytail-full`
+- **Context fork:** Yes
+- **Timeout:** 1800s
+- **Must complete:** Address all findings + tests passing
+
+## White-Hat 1 Sub-Agent
+
+For security auditing (first opinion):
+
+- **Model:** `kimi-k2.7-code:cloud`
+- **Skill:** `/white-hat`
+- **Context fork:** Yes (needs full codebase state)
+- **Timeout:** 1800s
+- **Output:** GitHub issue comment with severity-ranked findings
+- **Scope:** Dependency CVEs, secrets leakage, input validation, auth/authz, infrastructure, logging, data protection. Build attack chains, not isolated findings.
+- **Must do:** Follow all 8 workflow steps (scope → recon → scan → manual review → chain analysis → report → prioritize → re-test). Report by severity: Critical, High, Medium, Low, Info.
+
+## White-Hat 2 Sub-Agent
+
+For security auditing (second opinion, different model perspective):
+
+- **Model:** `glm-5.2:cloud`
+- **Skill:** `/white-hat`
+- **Context fork:** Yes (needs full codebase state)
+- **Timeout:** 1800s
+- **Output:** GitHub issue comment with severity-ranked findings
+- **Scope:** Same as White-Hat 1 but independent review. Cross-reference findings with WH1 for consensus.
+- **Must do:** Same workflow as White-Hat 1. Independent analysis — don't just repeat WH1 findings, find what they missed.
+
 ## Quick Reference
 
 | Type | Model | Skills | Notes |
@@ -40,6 +87,9 @@ For fixing audit findings or bugs:
 | Coding | glm-5.2:cloud | /implement + /ponytail-full | Tests must pass |
 | Audit | kimi-k2.7-code:cloud | /ponytail-audit | Post to GitHub |
 | Fix | glm-5.2:cloud | /implement + /ponytail-full | Address all findings |
+| Tester | kimi-k2.7-code:cloud | /diagnosing-bugs | Bugs & edge cases |
+| White-Hat 1 | kimi-k2.7-code:cloud | /white-hat | Security audit |
+| White-Hat 2 | glm-5.2:cloud | /white-hat | Security audit (second opinion) |
 
 ## Custom Personas
 

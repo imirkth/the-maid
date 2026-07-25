@@ -110,6 +110,7 @@ fn main() {
             commands::add_sandbox_folder,
             commands::remove_sandbox_folder,
             commands::complete_first_run,
+            commands::can_scan,
         ])
         .run(tauri::generate_context!())
         .expect("error while running The Maid application");

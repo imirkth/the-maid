@@ -12,6 +12,12 @@ interface ScanResult {
   rationale: string;
 }
 
+interface Settings {
+  sandbox_folders: string[];
+  first_run: boolean;
+  buckets: { id: string; name: string; path: string }[];
+}
+
 export default function ScanView() {
   const [directory, setDirectory] = useState("");
   const [scanning, setScanning] = useState(false);
@@ -19,19 +25,29 @@ export default function ScanView() {
   const [results, setResults] = useState<ScanResult[]>([]);
   const [error, setError] = useState("");
   const [backendReady, setBackendReady] = useState(false);
+  const [canScan, setCanScan] = useState(false);
+  const [settings, setSettings] = useState<Settings | null>(null);
 
   useEffect(() => {
-    // Listen for backend_ready event
+    // Load settings to check sandbox folders
+    invoke<Settings>("get_settings")
+      .then((s) => {
+        setSettings(s);
+        setCanScan(s.sandbox_folders.length > 0);
+        if (s.sandbox_folders.length > 0 && !directory) {
+          setDirectory(`${s.sandbox_folders[0]}`);
+        }
+      })
+      .catch((e) => setError(String(e)));
+
     const unlistenReady = listen<boolean>("backend_ready", (e) => {
       setBackendReady(e.payload);
     });
 
-    // Listen for scan_progress events
     const unlistenProgress = listen<number>("scan_progress", (e) => {
       setProgress(e.payload * 100);
     });
 
-    // Listen for scan_complete event
     const unlistenComplete = listen<unknown>("scan_complete", () => {
       setScanning(false);
       setProgress(100);
@@ -45,7 +61,7 @@ export default function ScanView() {
   }, []);
 
   const handleScan = async () => {
-    if (!directory) return;
+    if (!directory || !canScan) return;
     setScanning(true);
     setProgress(0);
     setError("");
@@ -71,18 +87,31 @@ export default function ScanView() {
     }
   };
 
+  const scanDisabled = scanning || !directory || !backendReady || !canScan;
+
   return (
     <div className="scan-view">
       <h2>📁 Scan Directory</h2>
+
+      {!canScan && (
+        <p className="warning">⚠️ Select at least one folder in Settings before scanning.</p>
+      )}
+
       <div className="scan-input">
-        <input
-          type="text"
-          placeholder="Enter path (e.g., ~/Downloads)"
-          value={directory}
-          onChange={(e) => setDirectory(e.target.value)}
-        />
-        <button onClick={handleScan} disabled={scanning || !directory || !backendReady}>
-          {scanning ? "Scanning..." : backendReady ? "Scan" : "Waiting for backend..."}
+        {settings && settings.sandbox_folders.length > 0 && (
+          <select
+            value={directory}
+            onChange={(e) => setDirectory(e.target.value)}
+            disabled={scanning}
+          >
+            <option value="">Select a folder to scan…</option>
+            {settings.sandbox_folders.map((f) => (
+              <option key={f} value={f}>{f}</option>
+            ))}
+          </select>
+        )}
+        <button onClick={handleScan} disabled={scanDisabled}>
+          {scanning ? "Scanning…" : !backendReady ? "Waiting for backend…" : !canScan ? "No folders selected" : "Scan"}
         </button>
         <button onClick={handlePing} disabled={!backendReady} style={{ marginLeft: "8px" }}>
           Health Check
@@ -100,12 +129,12 @@ export default function ScanView() {
 
       {results.length > 0 && (
         <div className="results-summary">
-          <p>Found {results.length} files to organize.</p>
+          <p>I found {results.length} files to organize.</p>
           <button className="primary">Review Proposals →</button>
         </div>
       )}
 
-      {results.length === 0 && !scanning && !error && directory && backendReady && (
+      {results.length === 0 && !scanning && !error && directory && backendReady && canScan && (
         <p style={{ color: "#888", marginTop: "16px" }}>I found nothing to organize.</p>
       )}
     </div>
