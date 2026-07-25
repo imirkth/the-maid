@@ -37,7 +37,9 @@ def _is_system_path(path: Path) -> bool:
     raw = str(path).replace('\\', '/')
     for sys_dir in SYSTEM_DIRS:
         sys_dir_norm = sys_dir.replace('\\', '/')
-        if resolved.startswith(sys_dir_norm) or raw.startswith(sys_dir_norm):
+        if resolved == sys_dir_norm or resolved.startswith(sys_dir_norm + '/'):
+            return True
+        if raw == sys_dir_norm or raw.startswith(sys_dir_norm + '/'):
             return True
     return False
 
@@ -52,11 +54,12 @@ def validate_path(path: str, sandbox_folders: list[str] | None = None) -> Path:
     expanded = os.path.expanduser(path)
 
     # Check raw input for Windows-style system paths before resolving
-    # (Linux resolve() mangles Windows paths)
+    # (Linux resolve() mangles Windows paths). Use exact-match-or-/-prefix
+    # to avoid treating /bingo, /usrfake, etc. as system dirs.
     raw_norm = expanded.replace('\\', '/')
     for sys_dir in SYSTEM_DIRS:
         sys_dir_norm = sys_dir.replace('\\', '/')
-        if raw_norm.startswith(sys_dir_norm):
+        if raw_norm == sys_dir_norm or raw_norm.startswith(sys_dir_norm + '/'):
             raise ValueError(f"System directories are out of scope: '{path}'")
 
     resolved = Path(expanded).resolve()

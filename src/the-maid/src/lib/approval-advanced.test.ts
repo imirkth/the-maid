@@ -7,6 +7,7 @@ import {
   reassignBucket,
   validateEditedPath,
   effectivePath,
+  buildFinalProposals,
 } from "../lib/approval";
 import type { CleanupItem } from "../types/cleanup-plan";
 
@@ -102,6 +103,28 @@ describe("applyFieldApprovals", () => {
     expect(result.proposed_tags).toEqual(["work", "important"]);
     expect(result.faces_detected).toEqual(["Unknown_Person_01"]);
   });
+
+  // --- Slice 4B regression: move-off must discard user_edited_path ---
+  it("clears user_edited_path when move is false so effectivePath falls back to current_path", () => {
+    const item = makeItem({
+      proposed_action: "move",
+      current_path: "/home/user/Desktop/test.txt",
+      proposed_path: "/home/user/Documents/test.txt",
+      user_edited_path: "/home/user/Downloads/test.txt",
+    });
+    const result = applyFieldApprovals(item, { move: false, tags: true, faces: true });
+    expect(result.user_edited_path).toBeUndefined();
+    expect(effectivePath(result)).toBe("/home/user/Desktop/test.txt");
+  });
+
+  it("keeps user_edited_path when move is true", () => {
+    const item = makeItem({
+      user_edited_path: "/home/user/Downloads/test.txt",
+    });
+    const result = applyFieldApprovals(item, { move: true, tags: true, faces: true });
+    expect(result.user_edited_path).toBe("/home/user/Downloads/test.txt");
+    expect(effectivePath(result)).toBe("/home/user/Downloads/test.txt");
+  });
 });
 
 describe("reassignBucket", () => {
@@ -125,6 +148,18 @@ describe("reassignBucket", () => {
     const bucket = { id: "1", name: "Docs", path: "/home/user/Documents" };
     reassignBucket(item, bucket);
     expect(item.proposed_path).toBe("/home/user/Documents/test.txt");
+  });
+
+  // --- Slice 4B regression: reassigning implies a move ---
+  it("changes tag action to move when reassigning to a bucket", () => {
+    const item = makeItem({
+      proposed_action: "tag",
+      current_path: "/home/user/Desktop/unknown.xyz",
+      proposed_path: "/home/user/Desktop/unknown.xyz",
+    });
+    const bucket = { id: "1", name: "Archive", path: "/home/user/Archive" };
+    const result = reassignBucket(item, bucket);
+    expect(result.proposed_action).toBe("move");
   });
 });
 
@@ -178,8 +213,75 @@ describe("validateEditedPath", () => {
     expect(result.valid).toBe(false);
   });
 
-  it("accepts relative path (frontend can't fully validate)", () => {
+  it("accepts relative path under home sandbox", () => {
     const result = validateEditedPath("Desktop/file.txt", ["Desktop"]);
     expect(result.valid).toBe(true);
+  });
+
+  // --- Slice 4B regression: false-positive system prefix ---
+  it("does not reject path that merely starts with a system dir name", () => {
+    const result = validateEditedPath("/bingo/file.txt", ["/home/user/Desktop"]);
+    expect(result.valid).toBe(false);
+    expect(result.error).not.toContain("System directories");
+    expect(result.error).toContain("outside the sandbox");
+  });
+
+  it("does not reject path that merely starts with /usr prefix", () => {
+    const result = validateEditedPath("/usrfake/evil.txt", ["/home/user/Desktop"]);
+    expect(result.valid).toBe(false);
+    expect(result.error).not.toContain("System directories");
+    expect(result.error).toContain("outside the sandbox");
+  });
+
+  // --- Slice 4B regression: relative sandbox must be under home ---
+  it("rejects relative sandbox name appearing as non-home component", () => {
+    const result = validateEditedPath("/tmp/Desktop/file.txt", ["Desktop"]);
+    expect(result.valid).toBe(false);
+    expect(result.error).toContain("outside the sandbox");
+  });
+
+  it("rejects relative path escaping via ..", () => {
+    const result = validateEditedPath("Desktop/../Documents/file.txt", ["Desktop"], "/home/user");
+    expect(result.valid).toBe(false);
+    expect(result.error).toContain("outside the sandbox");
+  });
+
+  it("resolves ~ to home", () => {
+    const result = validateEditedPath("~/Desktop/file.txt", ["Desktop"], "/home/user");
+    expect(result.valid).toBe(true);
+  });
+});
+
+describe("buildFinalProposals", () => {
+  it("returns only approved items", () => {
+    const a = makeItem({ file_id: "aaa11111" });
+    const b = makeItem({ file_id: "bbb22222" });
+    const result = buildFinalProposals([a, b], new Set(["aaa11111"]), {}, false);
+    expect(result).toHaveLength(1);
+    expect(result[0].file_id).toBe("aaa11111");
+  });
+
+  it("ignores stored field approvals when not in advanced mode", () => {
+    const item = makeItem({
+      file_id: "aaa11111",
+      user_edited_path: "/home/user/Downloads/test.txt",
+    });
+    const fields = { "aaa11111": { move: false, tags: true, faces: true } };
+    const result = buildFinalProposals([item], new Set(["aaa11111"]), fields, false);
+    expect(result[0].proposed_action).toBe("move");
+    expect(effectivePath(result[0])).toBe("/home/user/Downloads/test.txt");
+  });
+
+  it("applies stored field approvals when in advanced mode", () => {
+    const item = makeItem({
+      file_id: "aaa11111",
+      current_path: "/home/user/Desktop/test.txt",
+      proposed_path: "/home/user/Documents/test.txt",
+      user_edited_path: "/home/user/Downloads/test.txt",
+    });
+    const fields = { "aaa11111": { move: false, tags: true, faces: true } };
+    const result = buildFinalProposals([item], new Set(["aaa11111"]), fields, true);
+    expect(result[0].proposed_action).toBe("tag");
+    expect(effectivePath(result[0])).toBe("/home/user/Desktop/test.txt");
   });
 });

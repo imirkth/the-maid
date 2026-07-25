@@ -114,23 +114,41 @@ export function toggleField(
   };
 }
 
-// Apply field approvals to produce final CleanupItems
-// If move is unchecked → drop proposed_path (tag-only)
-// If tags is unchecked → clear proposed_tags
-// If faces is unchecked → clear faces_detected
+// Apply field approvals to produce final CleanupItems.
+// If move is unchecked → change action to 'tag', keep current_path, AND clear
+// user_edited_path so effectivePath() cannot resurrect a destination the user
+// explicitly disabled.
 export function applyFieldApprovals(
   item: CleanupItem,
   fields: FieldApprovals | undefined,
 ): CleanupItem {
   if (!fields) return item;
+  const moveApproved = fields.move;
   return {
     ...item,
     proposed_tags: fields.tags ? item.proposed_tags : [],
     faces_detected: fields.faces ? item.faces_detected : [],
-    // ponytail: if move unchecked, change action to 'tag' and keep current path
-    proposed_action: fields.move ? item.proposed_action : "tag",
-    proposed_path: fields.move ? item.proposed_path : item.current_path,
+    proposed_action: moveApproved ? item.proposed_action : "tag",
+    proposed_path: moveApproved ? item.proposed_path : item.current_path,
+    // Clear the inline edit override when move is rejected; otherwise a stale
+    // user_edited_path would win via effectivePath() and the file would still move.
+    user_edited_path: moveApproved ? item.user_edited_path : undefined,
   };
+}
+
+// Build the final list of proposals to execute, honoring simple/advanced mode.
+// In simple mode field approvals are ignored (all dimensions approved), matching
+// the all-or-nothing UI contract. In advanced mode stored per-field toggles apply.
+export function buildFinalProposals(
+  items: CleanupItem[],
+  approved: Set<string>,
+  fieldApprovals: ItemFieldApprovals,
+  advancedMode: boolean,
+): CleanupItem[] {
+  return getApprovedItems(items, approved).map((item) => {
+    const fields = advancedMode ? fieldApprovals[item.file_id] : { move: true, tags: true, faces: true };
+    return applyFieldApprovals(item, fields);
+  });
 }
 
 // --- Bucket selector (reassign file to different bucket) ---
@@ -141,7 +159,8 @@ export interface BucketOption {
   path: string;
 }
 
-// Reassign a file to a different bucket — updates proposed_path
+// Reassign a file to a different bucket — updates proposed_path and promotes
+// tag/delete to move so the reassignment is actually executed.
 export function reassignBucket(
   item: CleanupItem,
   bucket: BucketOption,
@@ -149,8 +168,10 @@ export function reassignBucket(
   const base = bucket.path.replace(/\\/g, "/").replace(/\/$/, "");
   const filename = item.original_filename;
   const newPath = `${base}/${filename}`;
+  const needsPromotion = item.proposed_action === "tag" || item.proposed_action === "delete";
   return {
     ...item,
+    proposed_action: needsPromotion ? "move" : item.proposed_action,
     proposed_path: newPath,
     user_edited_path: newPath,
     rationale: `Reassigned to ${bucket.name}: ${item.rationale}`,
@@ -167,27 +188,65 @@ const SYSTEM_DIRS = [
   "C:\\ProgramData",
 ];
 
-// Validate an edited path against sandbox folders
+function isSystemDir(normalized: string): boolean {
+  const n = normalized.replace(/\\/g, "/");
+  for (const sysDir of SYSTEM_DIRS) {
+    const sys = sysDir.replace(/\\/g, "/");
+    if (n === sys || n.startsWith(`${sys}/`)) {
+      return true;
+    }
+  }
+  return false;
+}
+
+function resolveAgainstHome(path: string, home: string | undefined): string {
+  if (!home) return path.replace(/\\/g, "/");
+  let p = path.replace(/\\/g, "/");
+  if (p.startsWith("~/")) {
+    p = `${home}/${p.slice(2)}`;
+  } else if (p === "~") {
+    p = home;
+  }
+  // Collapse trivial .. and . to match backend resolve() semantics as closely
+  // as a browser-side validator can. We do not follow symlinks here.
+  const parts = p.split("/").filter((part) => part !== ".");
+  const stack: string[] = [];
+  for (const part of parts) {
+    if (part === "..") {
+      stack.pop();
+    } else {
+      stack.push(part);
+    }
+  }
+  return stack.join("/") || "/";
+}
+
+// Validate an edited path against sandbox folders.
+// `home` is optional; when provided relative sandbox names are resolved against it,
+// matching the backend's Path.home() / folder containment.
 export function validateEditedPath(
   path: string,
   sandboxFolders: string[],
+  home?: string,
 ): { valid: boolean; error?: string } {
   if (!path || path.trim().length === 0) {
     return { valid: false, error: "Path cannot be empty" };
   }
-  const normalized = path.replace(/\\/g, "/");
-  for (const sysDir of SYSTEM_DIRS) {
-    if (normalized.startsWith(sysDir.replace(/\\/g, "/"))) {
-      return { valid: false, error: `System directories are out of scope: '${path}'` };
-    }
+  const normalized = resolveAgainstHome(path.trim(), home);
+
+  if (isSystemDir(normalized)) {
+    return { valid: false, error: `System directories are out of scope: '${path}'` };
   }
+
   // If no sandbox folders, just reject system paths
   if (sandboxFolders.length === 0) {
     return { valid: true };
   }
+
   // Sandbox containment: support both absolute paths and relative folder names.
-  // Absolute folders require proper prefix containment. Relative folder names match
-  // complete path components only — not substrings — to prevent escape.
+  // Absolute folders require proper prefix containment. Relative folder names are
+  // resolved against home when home is known; otherwise they require the path to
+  // start with that folder name (no escape via .. or unrelated prefix).
   for (const folder of sandboxFolders) {
     const f = folder.replace(/\\/g, "/").replace(/\/$/, "");
     if (f.startsWith("/") || /^[A-Za-z]:/.test(f)) {
@@ -196,10 +255,17 @@ export function validateEditedPath(
         return { valid: true };
       }
     } else {
-      // Relative folder name: match complete path component
-      const components = normalized.split("/").filter(Boolean);
-      if (components.includes(f)) {
-        return { valid: true };
+      // Relative folder name: resolve against home if available
+      if (home) {
+        const resolved = `${home}/${f}`;
+        if (normalized === resolved || normalized.startsWith(`${resolved}/`)) {
+          return { valid: true };
+        }
+      } else {
+        // Best-effort: path must begin with this folder component
+        if (normalized === f || normalized.startsWith(`${f}/`)) {
+          return { valid: true };
+        }
       }
     }
   }

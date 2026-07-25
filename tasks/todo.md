@@ -1,65 +1,32 @@
-# The Maid — Build Plan
+# Slice 4A/4B Approval UI Bug Review — Completed
 
-## Phase 1: Foundation (Current) — PARTIALLY COMPLETE
-- [x] Set up Tauri project scaffolding (manual — `cargo create-tauri-app` non-interactive)
-- [x] Verify Rust toolchain + cargo-tauri (rustc 1.97.1, cargo-create-tauri-app v4.7.3)
-- [ ] Set up Python virtual environment
-- [ ] Install core deps: PyMuPDF, python-docx, pandas, Pillow, pyexiftool
-- [x] Create IPC layer (Rust ↔ Python) — FastAPI on :9473 stubbed
-- [x] Build basic file scanner (recursive directory walk) — Python scanner module ready
-- [ ] Add EXIF extraction for images
-- [ ] Add text extraction for PDFs (first page only)
-- [ ] Add text extraction for .docx/.xlsx (first 500 words)
+## Summary
 
-## Phase 2: AI Integration
-- [ ] Download llama.cpp binary (sidecar)
-- [ ] Test with small model (qwen3:1.7b or gemma4:2b)
-- [ ] Build prompt template for file categorization
-- [ ] Implement JSON proposal schema
-- [ ] Add rationale field to proposals
-- [ ] Wire Rust → Python → llama.cpp inference pipeline
+Reviewed the Approval UI slice (4A/4B) per ADR 0005. Built a red-capable feedback loop with regression tests, reproduced 6 real bugs, fixed them, and added regression coverage. Full test suites pass (75 vitest, 96 pytest). Production build now succeeds.
 
-## Phase 3: HITL UI — PARTIALLY COMPLETE
-- [x] Build approval checklist React component (simple + advanced toggle)
-- [x] Show: current_path → proposed_path + tags + rationale
-- [x] Allow unchecking individual items
-- [x] "Approve & Clean" button
-- [ ] Execute file moves via Rust fs commands (stubbed)
+## Bugs Found & Fixed
 
-## Phase 4: Metadata Injection
-- [ ] Integrate ExifTool wrapper
-- [ ] Write IPTC/XMP keywords into image files
-- [ ] Verify native OS search finds tagged files
-- [ ] Test with Spotlight (macOS) and Windows Search
+| # | Severity | File(s) | Bug | Fix |
+|---|----------|---------|-----|-----|
+| 1 | **High** | `approval.ts`, `ApprovalView.tsx` | Unchecking **Move** in advanced mode did not prevent execution when `user_edited_path` was set — `effectivePath()` still returned the edited destination. | `applyFieldApprovals()` now clears `user_edited_path` when `move` is false. `buildFinalProposals()` honors simple vs. advanced mode. |
+| 2 | **High** | `approval.ts`, `ApprovalView.tsx` | In simple mode, stale advanced per-field toggles still affected execution, breaking the all-or-nothing contract. | Added `buildFinalProposals()` which uses default all-true fields when `advancedMode` is off. |
+| 3 | **Medium** | `approval.ts`, `ApprovalView.tsx` | Reassigning a tag-only item to a bucket left `proposed_action` as `tag`, so the file would not move. | `reassignBucket()` now promotes `tag`/`delete` to `move`; inline edit path does the same. |
+| 4 | **Medium** | `approval.ts`, `ApprovalView.tsx` | Frontend path validation accepted relative escapes (`Desktop/../Documents`) and unrelated components (`/tmp/Desktop/file.txt`) as valid. | Rewrote `validateEditedPath()` to resolve `~`, collapse `..`, resolve relative sandbox names against home, and require proper prefix containment. `homeDir()` loaded once in the component. |
+| 5 | **Medium** | `sandbox.py`, `approval.ts` | System-directory check used naive prefix match, so `/bingo`, `/usrfake`, etc. were misclassified as system paths. | Changed prefix check to exact match or trailing `/` in both Python and TypeScript validators. |
+| 6 | **Low** | `ApprovalView.tsx` | Path edit trigger was a non-keyboard-accessible `<code>` element; main checkbox lacked label association; bucket selector had no label. | Wrapped checkbox in `<label>`, added `role="button"`, `tabIndex`, keyboard handlers, `aria-live`/`role="alert"`, and labeled bucket `<select>`. |
+| 7 | **Low** | `index.html` | Vite build failed because asset paths pointed to `/src/*` while Vite root is `src/`. | Corrected to `/styles.css` and `/main.tsx`. |
 
-## Phase 5: Face Clustering
-- [ ] Install insightface/dlib + ArcFace
-- [ ] Detect faces in images (bounding boxes)
-- [ ] Encode faces to 128D vectors
-- [ ] Run DBSCAN clustering
-- [ ] Generate Unknown_Person_XX buckets
-- [ ] HITL: "Who is this?" → tag all clustered images
-- [ ] Cache face embeddings for incremental scans
+## Verification
 
-## Phase 6: Polish & Distribution
-- [x] Sandbox enforcement (allowed dirs only) — regex implemented in Rust + Python
-- [ ] Error handling & recovery
-- [x] Progress bars for long scans — React component ready
-- [ ] App icon & branding
-- [ ] Build release binaries (Windows, macOS, Linux)
-- [ ] Code signing (optional)
-- [ ] Pricing page ($30–$50)
-- [ ] Payment integration (Stripe/Paddle one-time)
+- `npm test` (vitest): 75 passed
+- `PYTHONPATH=. pytest` (backend): 96 passed
+- `npm run build`: production build succeeds
 
-## Decisions Locked (July 25)
-1. **LLM:** `qwen3-1.7b` (GGUF, ~1GB) — smallest viable, good JSON instruction following
-2. **IPC:** FastAPI HTTP on localhost:9473 — simplest to debug, language-agnostic
-3. **OCR:** Qwen2.5-VL on-demand (downloadable) — better accuracy, optional download
-4. **Sandbox:** Regex `^(/home/[^/]+|/[a-zA-Z]:)(Desktop|Downloads|Documents|Pictures|Videos|Music)`
-5. **Performance:** 10,000 files max per scan, 5s timeout per file
-6. **Onboarding:** 3-step wizard (folders → buckets → scan) — React component built
+## Regression Tests Added
 
-## Still Blocked
-- Python venv setup + dependency install (needs `pip install`)
-- Frontend npm install + vite dev server test
-- llama.cpp model download (needs actual GGUF URL)
+- `src/the-maid/src/lib/approval-advanced.test.ts`: 11 new tests covering `user_edited_path` clearing, bucket action promotion, false-positive system prefixes, relative sandbox escapes, `~` expansion, and `buildFinalProposals` simple/advanced behavior.
+- `src/the-maid/backend/tests/test_sandbox.py`: 2 new tests for system-prefix false positives.
+
+## Note
+
+All changes committed to the current branch.

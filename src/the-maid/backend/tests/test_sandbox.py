@@ -66,6 +66,17 @@ def test_is_system_path_linux():
     assert _is_system_path(Path("/etc/passwd"))
     assert not _is_system_path(Path("/home/user/Desktop"))
     assert not _is_system_path(Path("/tmp/test"))
+    # --- Slice 4B regression: prefixes are not system dirs ---
+    assert not _is_system_path(Path("/bingo"))
+    assert not _is_system_path(Path("/usrfake"))
+    assert not _is_system_path(Path("/binoculars"))
+
+
+def test_validate_path_does_not_reject_prefix_lookalikes():
+    """Paths that merely start with a system dir name should not be misclassified."""
+    for path in ["/bingo/file.txt", "/usrfake/evil.txt", "/binoculars/x"]:
+        with pytest.raises(ValueError, match="outside the sandbox"):
+            validate_path(path, ["Desktop"])
 
 
 def test_is_safe_move_both_in_sandbox():

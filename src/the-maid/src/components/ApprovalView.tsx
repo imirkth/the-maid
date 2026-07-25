@@ -1,9 +1,10 @@
 // The Maid — Approval View (ADR 0005: Batch + Detail + Inline Editing)
 // Slice 4B: Advanced Approval UI — granular toggles, bucket selector, sandbox validation
-import { useState, useEffect } from "react";
+import { useState, useEffect, useCallback, useMemo } from "react";
 import { invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
-import type { CleanupItem, CleanupPlan, ProposedAction, GroupedPlan } from "../types/cleanup-plan";
+import { homeDir } from "@tauri-apps/api/path";
+import type { CleanupItem, CleanupPlan, ProposedAction } from "../types/cleanup-plan";
 import {
   groupByAction,
   toggleApproval,
@@ -11,14 +12,13 @@ import {
   rejectGroup,
   approveAll,
   rejectAll,
-  getApprovedItems,
   effectivePath,
   confidenceLabel,
   ACTION_ICONS,
   ACTION_LABELS,
   defaultFieldApprovals,
   toggleField,
-  applyFieldApprovals,
+  buildFinalProposals,
   reassignBucket,
   validateEditedPath,
   type ItemFieldApprovals,
@@ -41,6 +41,7 @@ export default function ApprovalView() {
   const [editError, setEditError] = useState("");
   const [buckets, setBuckets] = useState<BucketOption[]>([]);
   const [sandboxFolders, setSandboxFolders] = useState<string[]>([]);
+  const [home, setHome] = useState<string>("");
   const [executing, setExecuting] = useState(false);
   const [message, setMessage] = useState("");
 
@@ -58,30 +59,29 @@ export default function ApprovalView() {
   // ponytail: try loading existing plan on mount (for dev without event)
   useEffect(() => {
     invoke<CleanupPlan>("get_cleanup_plan").catch(() => {});
-    // Load settings for buckets + sandbox folders
+    // Load settings for buckets + sandbox folders + home
     invoke<Settings>("get_settings")
       .then((s) => {
         setSandboxFolders(s.sandbox_folders);
         setBuckets(s.buckets.map((b) => ({ id: b.id, name: b.name, path: b.path })));
       })
       .catch(() => {});
+    homeDir()
+      .then((h) => setHome(h.replace(/\\/g, "/").replace(/\/$/, "")))
+      .catch(() => {});
   }, []);
 
   const items = plan?.items ?? [];
-  const grouped = groupByAction(items);
+  const grouped = useMemo(() => groupByAction(items), [items]);
   const approvedCount = approved.size;
 
-  const handleExecute = async () => {
+  const handleExecute = useCallback(async () => {
     if (!plan) return;
-    const approvedItems = getApprovedItems(items, approved);
-    if (approvedItems.length === 0) return;
+    const finalItems = buildFinalProposals(items, approved, fieldApprovals, advancedMode);
+    if (finalItems.length === 0) return;
     setExecuting(true);
     setMessage("");
     try {
-      // Apply field approvals (advanced mode granular toggles)
-      const finalItems = approvedItems.map((i) =>
-        applyFieldApprovals(i, fieldApprovals[i.file_id]),
-      );
       const result = await invoke<string>("approve_and_clean", {
         request: {
           proposals: finalItems.map((i) => ({
@@ -104,49 +104,66 @@ export default function ApprovalView() {
     } finally {
       setExecuting(false);
     }
-  };
+  }, [plan, items, approved, fieldApprovals, advancedMode]);
 
-  const startEdit = (item: CleanupItem) => {
+  const startEdit = useCallback((item: CleanupItem) => {
     setEditingId(item.file_id);
     setEditValue(effectivePath(item));
     setEditError("");
-  };
+  }, []);
 
-  const saveEdit = () => {
+  const saveEdit = useCallback(() => {
     if (!plan || !editingId) return;
     // Validate edited path against sandbox
-    const validation = validateEditedPath(editValue, sandboxFolders);
+    const validation = validateEditedPath(editValue, sandboxFolders, home);
     if (!validation.valid) {
       setEditError(validation.error ?? "Invalid path");
       return;
     }
-    setPlan({
-      ...plan,
-      items: plan.items.map((i) =>
-        i.file_id === editingId ? { ...i, user_edited_path: editValue } : i,
-      ),
+    setPlan((prev) => {
+      if (!prev) return prev;
+      return {
+        ...prev,
+        items: prev.items.map((i) => {
+          if (i.file_id !== editingId) return i;
+          const needsPromotion = i.proposed_action === "tag" || i.proposed_action === "delete";
+          return {
+            ...i,
+            proposed_action: needsPromotion ? "move" : i.proposed_action,
+            user_edited_path: editValue,
+          };
+        }),
+      };
     });
     setEditingId(null);
     setEditValue("");
     setEditError("");
-  };
+  }, [editValue, editingId, home, plan, sandboxFolders]);
 
-  const cancelEdit = () => {
+  const cancelEdit = useCallback(() => {
     setEditingId(null);
     setEditValue("");
     setEditError("");
-  };
+  }, []);
 
-  const handleReassign = (item: CleanupItem, bucket: BucketOption) => {
+  const handleReassign = useCallback((item: CleanupItem, bucket: BucketOption) => {
     if (!plan) return;
     const updated = reassignBucket(item, bucket);
-    setPlan({
-      ...plan,
-      items: plan.items.map((i) =>
-        i.file_id === item.file_id ? updated : i,
-      ),
+    setPlan((prev) => {
+      if (!prev) return prev;
+      return {
+        ...prev,
+        items: prev.items.map((i) => (i.file_id === item.file_id ? updated : i)),
+      };
     });
-  };
+  }, [plan]);
+
+  const handleKeyDown = useCallback((e: React.KeyboardEvent, action: () => void) => {
+    if (e.key === "Enter" || e.key === " ") {
+      e.preventDefault();
+      action();
+    }
+  }, []);
 
   // Empty state
   if (!plan || items.length === 0) {
@@ -176,7 +193,7 @@ export default function ApprovalView() {
         </div>
       </div>
 
-      <div className="approval-stats">
+      <div className="approval-stats" aria-live="polite">
         {approvedCount} of {items.length} approved
       </div>
 
@@ -214,12 +231,14 @@ export default function ApprovalView() {
                 className={`proposal-card ${approved.has(item.file_id) ? "approved" : ""}`}
               >
                 <div className="proposal-header">
-                  <input
-                    type="checkbox"
-                    checked={approved.has(item.file_id)}
-                    onChange={() => setApproved(toggleApproval(approved, item.file_id))}
-                  />
-                  <span className="filename">{item.original_filename}</span>
+                  <label className="proposal-checkbox-label">
+                    <input
+                      type="checkbox"
+                      checked={approved.has(item.file_id)}
+                      onChange={() => setApproved(toggleApproval(approved, item.file_id))}
+                    />
+                    <span className="filename">{item.original_filename}</span>
+                  </label>
                   <span className={`confidence confidence-${confidenceLabel(item.confidence).toLowerCase()}`}>
                     {confidenceLabel(item.confidence)}
                   </span>
@@ -234,11 +253,18 @@ export default function ApprovalView() {
                         type="text"
                         value={editValue}
                         onChange={(e) => setEditValue(e.target.value)}
+                        onKeyDown={(e) => handleKeyDown(e, saveEdit)}
                         autoFocus
+                        aria-invalid={!!editError}
+                        aria-describedby={editError ? "edit-error" : undefined}
                       />
                       <button className="small" onClick={saveEdit}>Save</button>
                       <button className="small" onClick={cancelEdit}>Cancel</button>
-                      {editError && <span className="edit-error">⚠️ {editError}</span>}
+                      {editError && (
+                        <span id="edit-error" className="edit-error" role="alert">
+                          ⚠️ {editError}
+                        </span>
+                      )}
                     </div>
                   ) : (
                     <div>
@@ -246,7 +272,10 @@ export default function ApprovalView() {
                       <code
                         className={item.user_edited_path ? "edited-path" : ""}
                         onClick={() => startEdit(item)}
-                        title="Click to edit"
+                        onKeyDown={(e) => handleKeyDown(e, () => startEdit(item))}
+                        role="button"
+                        tabIndex={0}
+                        title="Click to edit destination"
                         style={{ cursor: "pointer" }}
                       >
                         {effectivePath(item)}
@@ -311,20 +340,22 @@ export default function ApprovalView() {
                     {/* Bucket selector dropdown for reallocation */}
                     {buckets.length > 0 && (
                       <div className="bucket-selector">
-                        <span className="advanced-label">Reassign to:</span>
-                        <select
-                          defaultValue=""
-                          onChange={(e) => {
-                            const bucket = buckets.find((b) => b.id === e.target.value);
-                            if (bucket) handleReassign(item, bucket);
-                            e.target.value = "";
-                          }}
-                        >
-                          <option value="" disabled>Choose bucket…</option>
-                          {buckets.map((b) => (
-                            <option key={b.id} value={b.id}>{b.name}</option>
-                          ))}
-                        </select>
+                        <label>
+                          <span className="advanced-label">Reassign to:</span>
+                          <select
+                            defaultValue=""
+                            onChange={(e) => {
+                              const bucket = buckets.find((b) => b.id === e.target.value);
+                              if (bucket) handleReassign(item, bucket);
+                              e.target.value = "";
+                            }}
+                          >
+                            <option value="" disabled>Choose bucket…</option>
+                            {buckets.map((b) => (
+                              <option key={b.id} value={b.id}>{b.name}</option>
+                            ))}
+                          </select>
+                        </label>
                       </div>
                     )}
                   </div>
@@ -337,7 +368,7 @@ export default function ApprovalView() {
         );
       })}
 
-      {message && <div className={message.startsWith("Error") ? "error" : "success-msg"}>{message}</div>}
+      {message && <div className={message.startsWith("Error") ? "error" : "success-msg"} role="status">{message}</div>}
 
       <button
         className="primary approve-button"
