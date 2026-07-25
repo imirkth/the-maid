@@ -63,9 +63,15 @@ class FileScanner:
                 # Emit progress every 100 files
                 if self._progress_callback and self.scanned_count % 100 == 0:
                     self._progress_callback(self.scanned_count)
+                if self.scanned_count % 100 == 0:
+                    emit_progress(self.scanned_count, self.max_files)
 
             if self.scanned_count >= self.max_files:
                 break
+
+        if self._progress_callback:
+            self._progress_callback(self.scanned_count)
+        emit_complete(self.scanned_count)
 
         return results
 
@@ -126,9 +132,10 @@ class FileScanner:
         return ext_map.get(file_path.suffix.lower(), "application/octet-stream")
 
 
-def emit_progress(count: int) -> None:
+def emit_progress(count: int, max_files: int) -> None:
     """Print progress as JSON stdout line for Tauri event forwarding."""
-    print(json.dumps({"event": "scan_progress", "count": count}), flush=True)
+    progress = min(count / max_files, 1.0) if max_files > 0 else 0.0
+    print(json.dumps({"event": "scan_progress", "count": count, "progress": progress}), flush=True)
 
 
 def emit_complete(count: int) -> None:

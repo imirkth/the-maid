@@ -62,25 +62,56 @@ fn is_system_path(path: &str) -> bool {
     false
 }
 
-fn validate_path(path: &str, sandbox_folders: &[String]) -> Result<String, String> {
-    if is_system_path(path) {
-        return Err(format!("System directories are out of scope: '{}'", path));
+fn expand_tilde(path: &str) -> String {
+    if path.starts_with("~/") || path == "~" {
+        if let Ok(home) = std::env::var("HOME").or_else(|_| std::env::var("USERPROFILE")) {
+            if path == "~" {
+                return home;
+            }
+            return format!("{}/{}", home, &path[2..]);
+        }
     }
-    // ponytail: if sandbox_folders empty, just reject system paths
-    if sandbox_folders.is_empty() {
-        return Ok(path.to_string());
-    }
-    // Check containment against sandbox folders
+    path.to_string()
+}
+
+fn sandbox_folder_paths(sandbox_folders: &[String]) -> Vec<String> {
     let home = std::env::var("HOME")
         .or_else(|_| std::env::var("USERPROFILE"))
         .unwrap_or_default();
-    for folder in sandbox_folders {
-        let allowed = format!("{}/{}", home, folder);
-        if path == allowed || path.starts_with(&format!("{}/", allowed)) {
-            return Ok(path.to_string());
+    sandbox_folders
+        .iter()
+        .map(|f| {
+            let expanded = expand_tilde(f);
+            if expanded.starts_with('/') || expanded.contains(":\\") || expanded.contains(":/") {
+                expanded
+            } else {
+                format!("{}/{}", home, expanded)
+            }
+        })
+        .collect()
+}
+
+fn validate_path(path: &str, sandbox_folders: &[String]) -> Result<String, String> {
+    let expanded = expand_tilde(path);
+    if is_system_path(&expanded) {
+        return Err(format!("System directories are out of scope: '{}'", path));
+    }
+    if sandbox_folders.is_empty() {
+        return Ok(expanded);
+    }
+    let allowed_paths = sandbox_folder_paths(sandbox_folders);
+    let normalized_path = expanded.replace('\\', "/");
+    for allowed in &allowed_paths {
+        let normalized_allowed = allowed.replace('\\', "/");
+        if normalized_path == normalized_allowed || normalized_path.starts_with(&format!("{}/", normalized_allowed)) {
+            return Ok(expanded);
         }
     }
-    Err(format!("Path '{}' is outside the sandbox. Allowed: {}", path, sandbox_folders.join(", ")))
+    Err(format!(
+        "Path '{}' is outside the sandbox. Allowed: {}",
+        path,
+        sandbox_folders.join(", ")
+    ))
 }
 
 // --- Scan gate ---
@@ -292,6 +323,32 @@ mod tests {
     fn test_validate_path_empty_sandbox_allows_non_system() {
         let folders: Vec<String> = vec![];
         let result = validate_path("/tmp/test", &folders);
+        assert!(result.is_ok());
+    }
+
+    #[test]
+    fn test_validate_path_expands_tilde() {
+        let home = std::env::var("HOME").unwrap_or_default();
+        let folders = vec!["Desktop".to_string()];
+        let result = validate_path("~/Desktop/file.txt", &folders);
+        assert!(result.is_ok());
+        assert_eq!(result.unwrap(), format!("{}/Desktop/file.txt", home));
+    }
+
+    #[test]
+    fn test_validate_path_accepts_bare_folder_name() {
+        let home = std::env::var("HOME").unwrap_or_default();
+        let folders = vec!["Desktop".to_string()];
+        let result = validate_path("Desktop/file.txt", &folders);
+        assert!(result.is_ok());
+        assert_eq!(result.unwrap(), format!("{}/Desktop/file.txt", home));
+    }
+
+    #[test]
+    fn test_validate_path_accepts_absolute_sandbox_path() {
+        let home = std::env::var("HOME").unwrap_or_default();
+        let folders = vec!["Desktop".to_string()];
+        let result = validate_path(&format!("{}/Desktop/file.txt", home), &folders);
         assert!(result.is_ok());
     }
 

@@ -11,6 +11,7 @@ For implementing slices and writing code:
 - **Context fork:** Yes (needs current codebase state)
 - **Timeout:** 3600s (60 min)
 - **Must complete:** Implementation + tests passing before reporting done
+- **Must include in task prompt:** Explicit reference to both skills by name, plus the full skill.md contents pasted in context (agents don't have access to skill files unless we paste them)
 
 ## Auditor Sub-Agent
 
@@ -32,6 +33,7 @@ For fixing audit findings or bugs:
 - **Context fork:** Yes
 - **Timeout:** 3600s
 - **Must complete:** Fix all items + tests passing
+- **Must include in task prompt:** Explicit reference to both skills by name, plus the full skill.md contents pasted in context
 
 ## Tester Sub-Agent
 

@@ -23,10 +23,6 @@ DEFAULT_SANDBOX_FOLDERS = ["Desktop", "Downloads", "Documents", "Pictures"]
 MAX_FILES = 10_000
 
 
-# Timeout per file (seconds)
-FILE_TIMEOUT = 5.0
-
-
 def _normalize(path: Path) -> str:
     """Resolve symlinks and normalize for comparison."""
     try:

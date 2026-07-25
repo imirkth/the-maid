@@ -1,4 +1,5 @@
 """Tests for FileScanner — edge cases, symlinks, permissions, empty dirs."""
+import json
 import pytest
 import os
 import tempfile
@@ -116,9 +117,10 @@ def test_scan_special_characters_in_filename(temp_scan_dir):
     assert "file-with-dashes.txt" in filenames
 
 
-def test_scan_symlink_skipped_if_outside_sandbox(temp_scan_dir):
+def test_scan_symlink_skipped_if_outside_sandbox():
     """Symlinks pointing outside sandbox should be skipped."""
-    # Create a file outside the scan dir
+    temp_scan_dir = tempfile.mkdtemp(prefix="the-maid-test-", dir=str(Path.home() / "Desktop"))
+    # Create a file outside the sandbox
     outside = tempfile.mktemp(prefix="the-maid-outside-")
     Path(outside).write_text("secret")
 
@@ -126,14 +128,16 @@ def test_scan_symlink_skipped_if_outside_sandbox(temp_scan_dir):
     link = Path(temp_scan_dir, "link.txt")
     os.symlink(outside, link)
 
-    scanner = FileScanner()
-    results = scanner.scan_directory(temp_scan_dir)
+    try:
+        scanner = FileScanner()
+        results = scanner.scan_directory(temp_scan_dir, sandbox_folders=["Desktop"])
 
-    # Symlink should be skipped
-    filenames = [r["filename"] for r in results]
-    assert "link.txt" not in filenames
-
-    Path(outside).unlink(missing_ok=True)
+        # Symlink should be skipped
+        filenames = [r["filename"] for r in results]
+        assert "link.txt" not in filenames
+    finally:
+        Path(outside).unlink(missing_ok=True)
+        shutil.rmtree(temp_scan_dir, ignore_errors=True)
 
 
 def test_scan_symlink_inside_sandbox_followed(temp_scan_dir):
@@ -170,7 +174,7 @@ def test_scan_permission_denied_file(temp_scan_dir):
 
 
 def test_scan_progress_callback(temp_scan_dir):
-    """Progress callback should be called during scan."""
+    """Progress callback should be called during scan and at completion."""
     for i in range(250):
         Path(temp_scan_dir, f"file_{i}.txt").write_text(str(i))
 
@@ -178,10 +182,11 @@ def test_scan_progress_callback(temp_scan_dir):
     scanner = FileScanner(progress_callback=lambda count: progress_calls.append(count))
     scanner.scan_directory(temp_scan_dir)
 
-    # Should have been called at least once (every 100 files)
-    assert len(progress_calls) >= 2
+    # Should have been called at least once (every 100 files) plus final callback
+    assert len(progress_calls) >= 3
     assert progress_calls[0] == 100
-    assert progress_calls[-1] == 200
+    assert progress_calls[-2] == 200
+    assert progress_calls[-1] == 250
 
 
 def test_scan_metadata_fields(temp_scan_dir):
