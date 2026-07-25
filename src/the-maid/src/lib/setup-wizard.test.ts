@@ -2,99 +2,25 @@
 // Pure functions for setup state transitions, feature flags, and download state.
 
 import { describe, it, expect } from "vitest";
+import {
+  type FeatureFlags,
+  type DownloadStatus,
+  allDownloadsDone,
+  validateFolderSelection,
+  validateFeatureSelection,
+  buildSetupPayload,
+  nextStep,
+  prevStep,
+  canAdvanceFromStep1,
+  canAdvanceFromStep2,
+  canAdvanceFromStep3,
+} from "./setup";
 
-// --- Pure logic extracted from SetupWizard for testing ---
-
-interface FeatureFlags {
-  pdf_ocr: boolean;
-  face_clustering: boolean;
-  general_files: boolean;
-}
-
-type DownloadState = "idle" | "downloading" | "done" | "skipped";
-
-interface DownloadStatus {
-  state: DownloadState;
-  progress: number;
-}
-
-// Check if all required downloads are complete
-function allDownloadsDone(
-  downloads: Record<string, DownloadStatus>,
-  features: FeatureFlags,
-): boolean {
-  const required: { key: string; needed: boolean }[] = [
-    { key: "text", needed: true },
-    { key: "pdf", needed: features.pdf_ocr },
-    { key: "face", needed: features.face_clustering },
-  ];
-  return required.every(({ key, needed }) => {
-    if (!needed) return downloads[key]?.state === "skipped" || downloads[key]?.state === "done" || true;
-    return downloads[key]?.state === "done";
-  });
-}
-
-// Validate folder selection — at least one must be selected
-function validateFolderSelection(folders: string[]): { valid: boolean; error?: string } {
-  if (folders.length === 0) {
-    return { valid: false, error: "Select at least one folder" };
-  }
-  return { valid: true };
-}
-
-// Validate feature selection — general_files is the minimum
-function validateFeatureSelection(features: FeatureFlags): { valid: boolean; error?: string } {
-  if (!features.general_files && !features.pdf_ocr && !features.face_clustering) {
-    return { valid: false, error: "Select at least one feature" };
-  }
-  return { valid: true };
-}
-
-// Build the setup payload sent to the backend
-interface SetupPayload {
-  folders: string[];
-  pdf_ocr: boolean;
-  face_clustering: boolean;
-  general_files: boolean;
-}
-
-function buildSetupPayload(
-  folders: string[],
-  features: FeatureFlags,
-): SetupPayload {
-  return {
-    folders,
-    pdf_ocr: features.pdf_ocr,
-    face_clustering: features.face_clustering,
-    general_files: features.general_files,
-  };
-}
-
-// Determine which step to show based on state
-type WizardStep = 1 | 2 | 3 | 4;
-
-function nextStep(current: WizardStep): WizardStep {
-  return Math.min(current + 1, 4) as WizardStep;
-}
-
-function prevStep(current: WizardStep): WizardStep {
-  return Math.max(current - 1, 1) as WizardStep;
-}
-
-// Can advance from step 1?
-function canAdvanceFromStep1(folders: string[]): boolean {
-  return folders.length > 0;
-}
-
-// Can advance from step 3 (downloads)?
-function canAdvanceFromStep3(
-  downloads: Record<string, DownloadStatus>,
-  features: FeatureFlags,
-): boolean {
-  return allDownloadsDone(downloads, features);
-}
-
-// --- Tests ---
+const idleDownloads: Record<string, DownloadStatus> = {
+  text: { state: "idle", progress: 0 },
+  pdf: { state: "idle", progress: 0 },
+  face: { state: "idle", progress: 0 },
+};
 
 describe("Setup Wizard — folder selection", () => {
   it("validates at least one folder selected", () => {
@@ -124,15 +50,21 @@ describe("Setup Wizard — feature selection", () => {
     const all: FeatureFlags = { pdf_ocr: true, face_clustering: true, general_files: true };
     expect(validateFeatureSelection(all).valid).toBe(true);
   });
+
+  it("no features selected is invalid", () => {
+    const none: FeatureFlags = { pdf_ocr: false, face_clustering: false, general_files: false };
+    expect(validateFeatureSelection(none).valid).toBe(false);
+  });
+
+  it("canAdvanceFromStep2 requires at least one feature", () => {
+    const none: FeatureFlags = { pdf_ocr: false, face_clustering: false, general_files: false };
+    const general: FeatureFlags = { pdf_ocr: false, face_clustering: false, general_files: true };
+    expect(canAdvanceFromStep2(none)).toBe(false);
+    expect(canAdvanceFromStep2(general)).toBe(true);
+  });
 });
 
 describe("Setup Wizard — download state", () => {
-  const idleDownloads: Record<string, DownloadStatus> = {
-    text: { state: "idle", progress: 0 },
-    pdf: { state: "idle", progress: 0 },
-    face: { state: "idle", progress: 0 },
-  };
-
   it("allDownloadsDone — text only (general_files feature)", () => {
     const features: FeatureFlags = { pdf_ocr: false, face_clustering: false, general_files: true };
     const downloads = {
@@ -140,6 +72,14 @@ describe("Setup Wizard — download state", () => {
       text: { state: "done", progress: 100 },
     };
     expect(allDownloadsDone(downloads, features)).toBe(true);
+  });
+
+  it("allDownloadsDone — false when required text model is not done", () => {
+    const features: FeatureFlags = { pdf_ocr: false, face_clustering: false, general_files: true };
+    const downloads = {
+      ...idleDownloads,
+    };
+    expect(allDownloadsDone(downloads, features)).toBe(false);
   });
 
   it("allDownloadsDone — requires pdf when pdf_ocr selected", () => {
@@ -157,6 +97,7 @@ describe("Setup Wizard — download state", () => {
     const downloads = {
       ...idleDownloads,
       text: { state: "done", progress: 100 },
+      pdf: { state: "skipped", progress: 0 },
     };
     expect(allDownloadsDone(downloads, features)).toBe(true);
   });
@@ -169,6 +110,18 @@ describe("Setup Wizard — download state", () => {
       face: { state: "done", progress: 100 },
     };
     expect(allDownloadsDone(downloads, features)).toBe(true);
+  });
+
+  it("allDownloadsDone is pure — does not mutate downloads", () => {
+    const features: FeatureFlags = { pdf_ocr: false, face_clustering: false, general_files: true };
+    const downloads = {
+      text: { state: "done", progress: 100 },
+      pdf: { state: "idle", progress: 0 },
+      face: { state: "idle", progress: 0 },
+    };
+    const before = JSON.stringify(downloads);
+    allDownloadsDone(downloads, features);
+    expect(JSON.stringify(downloads)).toBe(before);
   });
 
   it("canAdvanceFromStep3 — false when download in progress", () => {

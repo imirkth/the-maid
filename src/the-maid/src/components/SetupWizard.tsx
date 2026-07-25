@@ -1,5 +1,12 @@
-import { useState } from "react";
+import { useState, useEffect, useRef } from "react";
 import { invoke } from "@tauri-apps/api/core";
+import {
+  type FeatureFlags,
+  type DownloadStatus,
+  allDownloadsDone,
+  canAdvanceFromStep2,
+  buildSetupPayload,
+} from "../lib/setup";
 
 interface Props {
   onComplete: () => void;
@@ -12,12 +19,7 @@ const MODELS = {
   face: { name: "Face Recognition Model", size: 100, optional: true },
 };
 
-type DownloadState = "idle" | "downloading" | "done" | "skipped";
-
-interface DownloadStatus {
-  state: DownloadState;
-  progress: number; // 0-100
-}
+type DownloadState = DownloadStatus["state"];
 
 export default function SetupWizard({ onComplete }: Props) {
   const [step, setStep] = useState(1);
@@ -33,12 +35,22 @@ export default function SetupWizard({ onComplete }: Props) {
     general_files: true,
   });
   const [downloads, setDownloads] = useState<Record<string, DownloadStatus>>({
-    text: { state: "idle", progress: 0 },
+    text: { state: "done", progress: 100 },
     pdf: { state: "idle", progress: 0 },
     face: { state: "idle", progress: 0 },
   });
   const [saving, setSaving] = useState(false);
   const [error, setError] = useState("");
+  const intervalsRef = useRef<Map<string, ReturnType<typeof setInterval>>(new Map());
+
+  // Cleanup any running download intervals when the wizard unmounts.
+  useEffect(() => {
+    const intervals = intervalsRef.current;
+    return () => {
+      intervals.forEach((interval) => clearInterval(interval));
+      intervals.clear();
+    };
+  }, []);
 
   const toggleFolder = (folder: string) => {
     setSelectedFolders((prev) =>
@@ -117,50 +129,52 @@ export default function SetupWizard({ onComplete }: Props) {
       </div>
       <div className="wizard-nav">
         <button onClick={() => setStep(1)}>← Back</button>
-        <button onClick={() => setStep(3)}>Next →</button>
+        <button onClick={() => setStep(3)} disabled={!canAdvanceFromStep2(features)}>
+          Next →
+        </button>
       </div>
     </div>
   );
 
   // Step 3: Model download with progress
-  const startDownload = (key: string, sizeMB: number) => {
+  const startDownload = (key: string) => {
     // ponytail: simulated download. Real download logic added when model bundling pipeline exists.
+    // Clear any previous interval for this model before starting a new one.
+    const previous = intervalsRef.current.get(key);
+    if (previous) clearInterval(previous);
+
     setDownloads((prev) => ({ ...prev, [key]: { state: "downloading", progress: 0 } }));
     const interval = setInterval(() => {
       setDownloads((prev) => {
         const current = prev[key];
         if (current.state !== "downloading") {
           clearInterval(interval);
+          intervalsRef.current.delete(key);
           return prev;
         }
         const next = Math.min(current.progress + Math.random() * 15 + 5, 100);
         if (next >= 100) {
           clearInterval(interval);
+          intervalsRef.current.delete(key);
           return { ...prev, [key]: { state: "done", progress: 100 } };
         }
         return { ...prev, [key]: { state: "downloading", progress: next } };
       });
     }, 200);
+    intervalsRef.current.set(key, interval);
   };
 
   const skipDownload = (key: string) => {
+    const interval = intervalsRef.current.get(key);
+    if (interval) {
+      clearInterval(interval);
+      intervalsRef.current.delete(key);
+    }
     setDownloads((prev) => ({ ...prev, [key]: { state: "skipped", progress: 0 } }));
   };
 
-  const allDownloadsDone = () => {
-    // Text model is always bundled — auto-done
-    if (downloads.text.state === "idle") {
-      setDownloads((prev) => ({ ...prev, text: { state: "done", progress: 100 } }));
-    }
-    const required = [
-      { key: "text", needed: true },
-      { key: "pdf", needed: features.pdf_ocr },
-      { key: "face", needed: features.face_clustering },
-    ];
-    return required.every(({ key, needed }) => {
-      if (!needed) return downloads[key]?.state === "skipped" || downloads[key]?.state === "done" || true;
-      return downloads[key]?.state === "done";
-    });
+  const isDownloadComplete = () => {
+    return allDownloadsDone(downloads, features);
   };
 
   const renderStep3 = () => (
@@ -186,7 +200,7 @@ export default function SetupWizard({ onComplete }: Props) {
               <span className="model-size">~{MODELS.pdf.size}MB</span>
             </div>
             {downloads.pdf.state === "idle" && (
-              <button onClick={() => startDownload("pdf", MODELS.pdf.size)} className="small">Download</button>
+              <button onClick={() => startDownload("pdf")} className="small">Download</button>
             )}
             {downloads.pdf.state === "downloading" && (
               <div className="download-progress">
@@ -209,7 +223,7 @@ export default function SetupWizard({ onComplete }: Props) {
               <span className="model-size">~{MODELS.face.size}MB</span>
             </div>
             {downloads.face.state === "idle" && (
-              <button onClick={() => startDownload("face", MODELS.face.size)} className="small">Download</button>
+              <button onClick={() => startDownload("face")} className="small">Download</button>
             )}
             {downloads.face.state === "downloading" && (
               <div className="download-progress">
@@ -237,9 +251,9 @@ export default function SetupWizard({ onComplete }: Props) {
         <button onClick={() => setStep(2)}>← Back</button>
         <button
           onClick={() => setStep(4)}
-          disabled={!allDownloadsDone()}
+          disabled={!isDownloadComplete()}
         >
-          {allDownloadsDone() ? "Next →" : "Waiting for downloads…"}
+          {isDownloadComplete() ? "Next →" : "Waiting for downloads…"}
         </button>
       </div>
     </div>
@@ -250,12 +264,8 @@ export default function SetupWizard({ onComplete }: Props) {
     setSaving(true);
     setError("");
     try {
-      await invoke("complete_setup", {
-        folders: selectedFolders,
-        pdfOcr: features.pdf_ocr,
-        faceClustering: features.face_clustering,
-        generalFiles: features.general_files,
-      });
+      const payload = buildSetupPayload(selectedFolders, features);
+      await invoke("complete_setup", payload);
       onComplete();
     } catch (err) {
       setError(String(err));
