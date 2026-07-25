@@ -23,8 +23,8 @@ def _exiftool_available() -> bool:
 def _write_xmp_tag(file_path: str, tag_name: str, tag_value: str) -> bool:
     """
     Write a single XMP tag to a file using exiftool.
-    tag_name should be the full qualified tag, e.g. "XMP:PersonInImage".
-    Returns True on success, False on failure.
+    tag_name should be the bare tag name, e.g. "PersonInImage".
+    Returns True on success, False on failure or if stderr is non-empty.
     """
     if not _exiftool_available():
         return False
@@ -38,7 +38,12 @@ def _write_xmp_tag(file_path: str, tag_name: str, tag_value: str) -> bool:
              f"-XMP:{tag_name}={tag_value}", file_path],
             capture_output=True, text=True, timeout=30
         )
-        return result.returncode == 0
+        if result.returncode != 0:
+            return False
+        # ExifTool warnings on stderr usually mean the tag was not written as intended.
+        if result.stderr and result.stderr.strip():
+            return False
+        return True
     except (subprocess.TimeoutExpired, FileNotFoundError):
         return False
 
@@ -129,7 +134,7 @@ def rename_cluster_with_tags(
                 errors.append(f"Outside sandbox: {file_path}")
                 continue
 
-        if _write_xmp_tag(file_path, "XMP:PersonInImage", sanitized):
+        if _write_xmp_tag(file_path, "PersonInImage", sanitized):
             tagged += 1
         else:
             skipped += 1
