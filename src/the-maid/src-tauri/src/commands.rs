@@ -154,6 +154,35 @@ pub async fn approve_and_clean(request: ApprovalRequest) -> Result<String, Strin
     Ok("Approved files moved successfully".to_string())
 }
 
+// --- Cleanup Plan commands ---
+
+#[derive(Serialize, Deserialize, Debug, Clone)]
+pub struct CleanupItemCmd {
+    pub file_id: String,
+    pub original_filename: String,
+    pub current_path: String,
+    pub proposed_action: String,
+    pub proposed_path: String,
+    pub proposed_tags: Vec<String>,
+    pub faces_detected: Vec<String>,
+    pub rationale: String,
+    pub confidence: f64,
+    pub user_edited_path: Option<String>,
+}
+
+#[derive(Serialize, Deserialize, Debug)]
+pub struct CleanupPlanCmd {
+    pub schema_version: String,
+    pub scan_timestamp: String,
+    pub items: Vec<CleanupItemCmd>,
+}
+
+#[tauri::command]
+pub async fn get_cleanup_plan() -> Result<Option<CleanupPlanCmd>, String> {
+    // ponytail: returns None if no plan generated yet. Backend sends plan via event.
+    Ok(None)
+}
+
 #[tauri::command]
 pub async fn get_buckets() -> Result<Vec<Bucket>, String> {
     let settings = Settings::load()?;

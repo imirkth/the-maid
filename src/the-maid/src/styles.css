@@ -330,6 +330,134 @@ code {
   margin-top: 20px;
 }
 
+/* Action Groups (ADR 0005) */
+.action-group {
+  margin-bottom: 24px;
+}
+
+.action-group-header {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  margin-bottom: 12px;
+  padding-bottom: 8px;
+  border-bottom: 1px solid var(--border);
+}
+
+.action-group-header h3 {
+  margin: 0;
+  font-size: 1rem;
+}
+
+.group-controls {
+  display: flex;
+  gap: 6px;
+  align-items: center;
+}
+
+.group-stats {
+  color: var(--text-secondary);
+  font-size: 0.85rem;
+  margin-left: 4px;
+}
+
+button.small {
+  padding: 4px 10px;
+  font-size: 0.8rem;
+}
+
+/* Confidence badges */
+.confidence {
+  font-size: 0.75rem;
+  padding: 2px 8px;
+  border-radius: 10px;
+  margin-left: auto;
+}
+
+.confidence-high {
+  background: rgba(16, 185, 129, 0.15);
+  color: var(--success);
+}
+
+.confidence-medium {
+  background: rgba(245, 158, 11, 0.15);
+  color: var(--warning);
+}
+
+.confidence-low {
+  background: rgba(239, 68, 68, 0.15);
+  color: var(--danger);
+}
+
+.confidence-none {
+  color: var(--text-secondary);
+}
+
+/* Inline editing (ADR 0005) */
+.inline-edit {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  margin-top: 4px;
+}
+
+.inline-edit input {
+  flex: 1;
+  font-size: 0.85rem;
+}
+
+.edited-path {
+  border: 1px dashed var(--accent);
+  border-radius: 3px;
+  padding: 1px 4px;
+}
+
+.edited-badge {
+  color: var(--accent);
+  font-size: 0.75rem;
+  margin-left: 4px;
+}
+
+/* Advanced mode */
+.advanced-controls {
+  margin-top: 8px;
+  padding-top: 8px;
+  border-top: 1px dashed var(--border);
+}
+
+.advanced-label {
+  font-size: 0.8rem;
+  color: var(--text-secondary);
+  margin-right: 6px;
+}
+
+.faces-row {
+  margin-top: 4px;
+}
+
+.muted {
+  color: var(--text-secondary);
+  font-size: 0.8rem;
+}
+
+/* Success message */
+.success-msg {
+  background: rgba(16, 185, 129, 0.1);
+  border: 1px solid var(--success);
+  color: var(--success);
+  padding: 12px;
+  border-radius: 8px;
+  margin: 12px 0;
+}
+
+.advanced-toggle {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  font-size: 0.9rem;
+  cursor: pointer;
+}
+
 /* Bucket Manager */
 .bucket-list {
   list-style: none;

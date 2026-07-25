@@ -111,6 +111,7 @@ fn main() {
             commands::remove_sandbox_folder,
             commands::complete_first_run,
             commands::can_scan,
+            commands::get_cleanup_plan,
         ])
         .run(tauri::generate_context!())
         .expect("error while running The Maid application");
@@ -128,6 +129,9 @@ fn forward_event(handle: &tauri::AppHandle, event: SidecarEvent) {
                         }
                         "scan_complete" => {
                             let _ = handle.emit("scan_complete", &val);
+                        }
+                        "cleanup_plan_ready" => {
+                            let _ = handle.emit("cleanup_plan_ready", &val);
                         }
                         _ => {
                             let _ = handle.emit("python_event", &val);
