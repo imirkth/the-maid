@@ -3,7 +3,7 @@
 
 use serde::{Deserialize, Serialize};
 use std::fs;
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 
 #[derive(Serialize, Deserialize, Debug, Clone, Default)]
 pub struct Settings {
@@ -20,15 +20,20 @@ pub struct BucketEntry {
 }
 
 impl Settings {
+    /// Create settings with defaults for a first-run user.
+    pub fn new() -> Self {
+        Settings {
+            sandbox_folders: default_folders(),
+            first_run: true,
+            buckets: vec![],
+        }
+    }
+
     /// Load settings from ~/.the-maid/settings.json, or return defaults.
     pub fn load() -> Result<Self, String> {
         let path = settings_path()?;
         if !path.exists() {
-            return Ok(Settings {
-                sandbox_folders: default_folders(),
-                first_run: true,
-                buckets: vec![],
-            });
+            return Ok(Self::new());
         }
         let data = fs::read_to_string(&path)
             .map_err(|e| format!("Failed to read settings: {}", e))?;
@@ -102,11 +107,19 @@ fn default_folders() -> Vec<String> {
 mod tests {
     use super::*;
 
+    use std::sync::atomic::{AtomicU64, Ordering};
+
+    static TEST_COUNTER: AtomicU64 = AtomicU64::new(0);
+
     fn setup_temp_settings() -> PathBuf {
+        let count = TEST_COUNTER.fetch_add(1, Ordering::SeqCst);
         let tmp = std::env::temp_dir().join(format!(
-            "the-maid-test-{}",
-            std::process::id()
+            "the-maid-test-{}-{}",
+            std::process::id(),
+            count
         ));
+        // Clean up any leftover from previous run
+        std::fs::remove_dir_all(&tmp).ok();
         std::fs::create_dir_all(&tmp).unwrap();
         // ponytail: override HOME for test isolation
         std::env::set_var("HOME", &tmp);
@@ -165,7 +178,7 @@ mod tests {
 
     #[test]
     fn test_first_run_flag() {
-        let mut settings = Settings::default();
+        let mut settings = Settings::new();
         assert!(settings.first_run);
         settings.complete_first_run();
         assert!(!settings.first_run);
