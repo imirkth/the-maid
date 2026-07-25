@@ -146,11 +146,13 @@ export function reassignBucket(
   item: CleanupItem,
   bucket: BucketOption,
 ): CleanupItem {
+  const base = bucket.path.replace(/\\/g, "/").replace(/\/$/, "");
   const filename = item.original_filename;
+  const newPath = `${base}/${filename}`;
   return {
     ...item,
-    proposed_path: `${bucket.path}/${filename}`,
-    user_edited_path: `${bucket.path}/${filename}`,
+    proposed_path: newPath,
+    user_edited_path: newPath,
     rationale: `Reassigned to ${bucket.name}: ${item.rationale}`,
   };
 }
@@ -183,19 +185,23 @@ export function validateEditedPath(
   if (sandboxFolders.length === 0) {
     return { valid: true };
   }
-  // Check containment — path must be absolute or within a sandbox folder
-  // ponytail: accept both absolute paths and relative-to-home paths
-  const home = (typeof window !== "undefined" ? "" : ""); // frontend doesn't know HOME, so just check suffix
+  // Sandbox containment: support both absolute paths and relative folder names.
+  // Absolute folders require proper prefix containment. Relative folder names match
+  // complete path components only — not substrings — to prevent escape.
   for (const folder of sandboxFolders) {
-    // Accept paths that end with /folder or contain /folder/
-    if (normalized.includes(`/${folder}/`) || normalized.endsWith(`/${folder}`) || normalized === folder) {
-      return { valid: true };
+    const f = folder.replace(/\\/g, "/").replace(/\/$/, "");
+    if (f.startsWith("/") || /^[A-Za-z]:/.test(f)) {
+      // Absolute sandbox folder: require normalized path to be folder or inside it
+      if (normalized === f || normalized.startsWith(`${f}/`)) {
+        return { valid: true };
+      }
+    } else {
+      // Relative folder name: match complete path component
+      const components = normalized.split("/").filter(Boolean);
+      if (components.includes(f)) {
+        return { valid: true };
+      }
     }
   }
-  // If path looks absolute and doesn't match any sandbox folder, reject
-  if (normalized.startsWith("/") || normalized.match(/^[A-Z]:\\\\/i)) {
-    return { valid: false, error: `Path '${path}' is outside the sandbox. Allowed: ${sandboxFolders.join(", ")}` };
-  }
-  // Relative path — assume ok (frontend can't fully validate)
-  return { valid: true };
+  return { valid: false, error: `Path '${path}' is outside the sandbox. Allowed: ${sandboxFolders.join(", ")}` };
 }

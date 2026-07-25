@@ -10,8 +10,11 @@ import {
   getApprovedItems,
   effectivePath,
   confidenceLabel,
+  validateEditedPath,
+  reassignBucket,
 } from "../lib/approval";
 import type { CleanupItem, ProposedAction } from "../types/cleanup-plan";
+import type { BucketOption } from "../lib/approval";
 
 function makeItem(overrides: Partial<CleanupItem> = {}): CleanupItem {
   return {
@@ -154,5 +157,52 @@ describe("confidenceLabel", () => {
 
   it("returns — for 0", () => {
     expect(confidenceLabel(0)).toBe("—");
+  });
+});
+
+// --- Slice 3 regression tests ---
+
+describe("validateEditedPath", () => {
+  const sandboxFolders = ["/home/user/Desktop", "/home/user/Documents"];
+
+  it("rejects path that merely contains sandbox folder as substring", () => {
+    const result = validateEditedPath("/home/user/DesktopTopEvil/evil.txt", sandboxFolders);
+    expect(result.valid).toBe(false);
+  });
+
+  it("rejects path inside folder with sandbox prefix plus suffix", () => {
+    const result = validateEditedPath("/home/user/Desktop2/evil.txt", sandboxFolders);
+    expect(result.valid).toBe(false);
+  });
+
+  it("accepts exact sandbox folder path", () => {
+    const result = validateEditedPath("/home/user/Desktop", sandboxFolders);
+    expect(result.valid).toBe(true);
+  });
+
+  it("accepts file inside sandbox folder", () => {
+    const result = validateEditedPath("/home/user/Desktop/file.txt", sandboxFolders);
+    expect(result.valid).toBe(true);
+  });
+
+  it("rejects path outside all sandbox folders", () => {
+    const result = validateEditedPath("/home/user/Downloads/file.txt", sandboxFolders);
+    expect(result.valid).toBe(false);
+  });
+
+  it("handles Windows backslash separators", () => {
+    const result = validateEditedPath("C:\\Users\\user\\Desktop\\file.txt", sandboxFolders);
+    expect(result.valid).toBe(false);
+  });
+});
+
+describe("reassignBucket", () => {
+  it("strips trailing slash from bucket path", () => {
+    const item = makeItem({ original_filename: "file.txt" });
+    const bucket: BucketOption = { id: "docs", name: "Documents", path: "/home/user/Documents/" };
+    const moved = reassignBucket(item, bucket);
+    expect(moved.proposed_path).toBe("/home/user/Documents/file.txt");
+    expect(moved.proposed_path).not.toContain("//");
+    expect(moved.user_edited_path).toBe("/home/user/Documents/file.txt");
   });
 });
