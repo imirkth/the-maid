@@ -4,9 +4,46 @@
 use serde::{Deserialize, Serialize};
 use std::path::Path;
 use regex::Regex;
+use tauri::State;
+use crate::AppState;
+use crate::settings::{Settings, BucketEntry};
 
-// Sandbox validation regex
-// Matches: /home/user/Desktop, C:\Users\User\Downloads, etc.
+// --- Settings commands ---
+
+#[tauri::command]
+pub async fn get_settings() -> Result<Settings, String> {
+    Settings::load()
+}
+
+#[tauri::command]
+pub async fn save_settings(mut settings: Settings) -> Result<(), String> {
+    settings.save()
+}
+
+#[tauri::command]
+pub async fn add_sandbox_folder(folder: String) -> Result<Settings, String> {
+    let mut s = Settings::load()?;
+    s.add_folder(&folder);
+    s.save()?;
+    Ok(s)
+}
+
+#[tauri::command]
+pub async fn remove_sandbox_folder(folder: String) -> Result<Settings, String> {
+    let mut s = Settings::load()?;
+    s.remove_folder(&folder);
+    s.save()?;
+    Ok(s)
+}
+
+#[tauri::command]
+pub async fn complete_first_run() -> Result<(), String> {
+    let mut s = Settings::load()?;
+    s.complete_first_run();
+    s.save()
+}
+
+// ponytail: sandbox regex — simple but covers the common cases. Tighten when real abuse patterns appear.
 const SANDBOX_PATTERN: &str = r"^(/home/[^/]+|/[a-zA-Z]:[/\\])(Desktop|Downloads|Documents|Pictures|Videos|Music)([/\\].*)?$";
 
 fn is_in_sandbox(path: &str) -> bool {
@@ -128,4 +165,9 @@ pub async fn cluster_faces(directory: String) -> Result<Vec<String>, String> {
 pub async fn tag_face_cluster(cluster_id: String, name: String) -> Result<(), String> {
     // TODO: Update face index and write XMP tags
     Ok(())
+}
+
+#[tauri::command]
+pub async fn ping_backend(state: State<'_, AppState>) -> Result<(), String> {
+    state.sidecar.ping()
 }

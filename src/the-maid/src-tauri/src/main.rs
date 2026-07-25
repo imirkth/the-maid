@@ -4,11 +4,12 @@
 
 use tauri::Manager;
 use std::path::PathBuf;
-use std::sync::{Arc, Mutex};
+use std::sync::Arc;
 
 mod commands;
+mod settings;
 
-use maid_sidecar::SidecarManager;
+use maid_sidecar::{SidecarManager, SidecarEvent};
 
 /// Shared sidecar manager — accessible from commands.
 pub struct AppState {
@@ -20,13 +21,11 @@ fn resolve_backend_path(app: &tauri::AppHandle) -> PathBuf {
         app.path()
             .resolve("backend/the_maid_backend.exe", tauri::BaseDirectory::Resource)
             .unwrap_or_else(|_| {
-                // Dev fallback
                 let workspace = std::env::var("MAID_WORKSPACE")
                     .unwrap_or_else(|_| String::from("."));
                 PathBuf::from(workspace).join("src/the-maid/backend/run.py")
             })
     } else {
-        // Development: run from workspace
         let workspace = std::env::var("MAID_WORKSPACE")
             .unwrap_or_else(|_| {
                 let home = std::env::var("HOME").unwrap_or_else(|_| String::from("."));
@@ -49,7 +48,7 @@ fn main() {
 
             let manager = Arc::new(SidecarManager::new(backend_path));
 
-            // Spawn in a separate thread so we don't block setup
+            // Spawn sidecar in a separate thread
             let manager_clone = manager.clone();
             let emit_handle = app_handle.clone();
             std::thread::spawn(move || {
@@ -57,14 +56,31 @@ fn main() {
                     Ok(()) => {
                         log::info!("[The Maid] Python backend is READY");
                         let _ = emit_handle.emit("backend_ready", true);
+
+                        // Forward sidecar events to frontend
+                        if let Some(rx) = manager_clone.take_event_receiver() {
+                            let fwd_handle = emit_handle.clone();
+                            std::thread::spawn(move || {
+                                for event in rx {
+                                    forward_event(&fwd_handle, event);
+                                }
+                            });
+                        }
                     }
                     Err(e) => {
                         log::error!("[The Maid] Failed to start Python backend: {}", e);
-                        // Attempt restart with backoff
                         match manager_clone.restart_with_backoff() {
                             Ok(()) => {
                                 log::info!("[The Maid] Python backend restarted successfully");
                                 let _ = emit_handle.emit("backend_ready", true);
+                                if let Some(rx) = manager_clone.take_event_receiver() {
+                                    let fwd_handle = emit_handle.clone();
+                                    std::thread::spawn(move || {
+                                        for event in rx {
+                                            forward_event(&fwd_handle, event);
+                                        }
+                                    });
+                                }
                             }
                             Err(e2) => {
                                 log::error!("[The Maid] Python backend failed after restarts: {}", e2);
@@ -75,11 +91,7 @@ fn main() {
                 }
             });
 
-            // Store sidecar manager in app state
-            app.manage(AppState {
-                sidecar: manager,
-            });
-
+            app.manage(AppState { sidecar: manager });
             Ok(())
         })
         .invoke_handler(tauri::generate_handler![
@@ -93,7 +105,52 @@ fn main() {
             commands::write_metadata,
             commands::cluster_faces,
             commands::tag_face_cluster,
+            commands::ping_backend,
+            commands::get_settings,
+            commands::save_settings,
+            commands::add_sandbox_folder,
+            commands::remove_sandbox_folder,
+            commands::complete_first_run,
         ])
         .run(tauri::generate_context!())
         .expect("error while running The Maid application");
+}
+
+/// Forward a SidecarEvent to the Tauri frontend via emit.
+fn forward_event(handle: &tauri::AppHandle, event: SidecarEvent) {
+    match event {
+        SidecarEvent::Stdout(line) => {
+            // Try to parse as JSON event { "event": "scan_progress", "progress": 0.5 }
+            if let Ok(val) = serde_json::from_str::<serde_json::Value>(&line) {
+                if let Some(event_name) = val.get("event").and_then(|v| v.as_str()) {
+                    match event_name {
+                        "scan_progress" => {
+                            let progress = val.get("progress").and_then(|v| v.as_f64()).unwrap_or(0.0);
+                            let _ = handle.emit("scan_progress", progress);
+                        }
+                        "scan_complete" => {
+                            let _ = handle.emit("scan_complete", &val);
+                        }
+                        _ => {
+                            let _ = handle.emit("python_event", &val);
+                        }
+                    }
+                }
+            } else {
+                // Plain text — emit as raw log
+                let _ = handle.emit("python_log", line);
+            }
+        }
+        SidecarEvent::Stderr(line) => {
+            log::warn!("[The Maid] Python stderr: {}", line);
+            let _ = handle.emit("python_error", line);
+        }
+        SidecarEvent::Pong => {
+            let _ = handle.emit("backend_pong", true);
+        }
+        SidecarEvent::Crashed(msg) => {
+            log::error!("[The Maid] Python crashed: {}", msg);
+            let _ = handle.emit("backend_crashed", msg);
+        }
+    }
 }
