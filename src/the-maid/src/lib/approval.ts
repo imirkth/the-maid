@@ -79,3 +79,123 @@ export const ACTION_LABELS: Record<ProposedAction, string> = {
   delete: "Delete",
   rename: "Rename",
 };
+
+// --- ADR 0005: Advanced approval (granular per-field toggles) ---
+
+// Per-field approval state for advanced mode
+export interface FieldApprovals {
+  move: boolean;
+  tags: boolean;
+  faces: boolean;
+}
+
+// Per-item field approvals: file_id → {move, tags, faces}
+export type ItemFieldApprovals = Record<string, FieldApprovals>;
+
+// Default field approvals: all true (user approves everything by default)
+export function defaultFieldApprovals(items: CleanupItem[]): ItemFieldApprovals {
+  const result: ItemFieldApprovals = {};
+  for (const item of items) {
+    result[item.file_id] = { move: true, tags: true, faces: true };
+  }
+  return result;
+}
+
+// Toggle a single field (move/tags/faces) for an item
+export function toggleField(
+  state: ItemFieldApprovals,
+  fileId: string,
+  field: keyof FieldApprovals,
+): ItemFieldApprovals {
+  const current = state[fileId] ?? { move: true, tags: true, faces: true };
+  return {
+    ...state,
+    [fileId]: { ...current, [field]: !current[field] },
+  };
+}
+
+// Apply field approvals to produce final CleanupItems
+// If move is unchecked → drop proposed_path (tag-only)
+// If tags is unchecked → clear proposed_tags
+// If faces is unchecked → clear faces_detected
+export function applyFieldApprovals(
+  item: CleanupItem,
+  fields: FieldApprovals | undefined,
+): CleanupItem {
+  if (!fields) return item;
+  return {
+    ...item,
+    proposed_tags: fields.tags ? item.proposed_tags : [],
+    faces_detected: fields.faces ? item.faces_detected : [],
+    // ponytail: if move unchecked, change action to 'tag' and keep current path
+    proposed_action: fields.move ? item.proposed_action : "tag",
+    proposed_path: fields.move ? item.proposed_path : item.current_path,
+  };
+}
+
+// --- Bucket selector (reassign file to different bucket) ---
+
+export interface BucketOption {
+  id: string;
+  name: string;
+  path: string;
+}
+
+// Reassign a file to a different bucket — updates proposed_path
+export function reassignBucket(
+  item: CleanupItem,
+  bucket: BucketOption,
+): CleanupItem {
+  const filename = item.original_filename;
+  return {
+    ...item,
+    proposed_path: `${bucket.path}/${filename}`,
+    user_edited_path: `${bucket.path}/${filename}`,
+    rationale: `Reassigned to ${bucket.name}: ${item.rationale}`,
+  };
+}
+
+// --- Sandbox validation for edited paths ---
+
+// System directories that are always rejected
+const SYSTEM_DIRS = [
+  "/bin", "/sbin", "/usr", "/etc", "/var", "/opt", "/lib", "/lib64",
+  "/boot", "/dev", "/proc", "/sys", "/run", "/srv", "/root",
+  "C:\\Windows", "C:\\Program Files", "C:\\Program Files (x86)",
+  "C:\\ProgramData",
+];
+
+// Validate an edited path against sandbox folders
+export function validateEditedPath(
+  path: string,
+  sandboxFolders: string[],
+): { valid: boolean; error?: string } {
+  if (!path || path.trim().length === 0) {
+    return { valid: false, error: "Path cannot be empty" };
+  }
+  const normalized = path.replace(/\\/g, "/");
+  for (const sysDir of SYSTEM_DIRS) {
+    if (normalized.startsWith(sysDir.replace(/\\/g, "/"))) {
+      return { valid: false, error: `System directories are out of scope: '${path}'` };
+    }
+  }
+  // If no sandbox folders, just reject system paths
+  if (sandboxFolders.length === 0) {
+    return { valid: true };
+  }
+  // Check containment — path must be absolute or within a sandbox folder
+  // ponytail: accept both absolute paths and relative-to-home paths
+  const home = (typeof window !== "undefined" ? "" : ""); // frontend doesn't know HOME, so just check suffix
+  for (const folder of sandboxFolders) {
+    // Accept paths that end with /folder or contain /folder/
+    if (normalized.includes(`/${folder}/`) || normalized.endsWith(`/${folder}`) || normalized === folder) {
+      return { valid: true };
+    }
+  }
+  // If path looks absolute and doesn't match any sandbox folder, reject
+  if (normalized.startsWith("/") || normalized.match(/^[A-Z]:\\\\/i)) {
+    return { valid: false, error: `Path '${path}' is outside the sandbox. Allowed: ${sandboxFolders.join(", ")}` };
+  }
+  // Relative path — assume ok (frontend can't fully validate)
+  return { valid: true };
+}

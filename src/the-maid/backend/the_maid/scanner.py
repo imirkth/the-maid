@@ -45,14 +45,13 @@ class FileScanner:
 
                 file_path = Path(dirpath) / filename
 
-                # Skip symlinks pointing outside scan root
+                # Skip symlinks pointing outside the sandbox
                 if file_path.is_symlink():
                     try:
                         target = file_path.resolve()
-                        if not str(target).startswith(str(root)):
-                            continue  # ponytail: skip symlinks escaping scan root
-                    except (OSError, RuntimeError):
-                        continue  # skip broken symlinks
+                        validate_path(str(target), sandbox_folders)
+                    except (OSError, RuntimeError, ValueError):
+                        continue  # skip symlinks escaping sandbox or broken
 
                 try:
                     metadata = self._extract_metadata(file_path)

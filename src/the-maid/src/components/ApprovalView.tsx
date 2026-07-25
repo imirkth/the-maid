@@ -1,4 +1,5 @@
 // The Maid — Approval View (ADR 0005: Batch + Detail + Inline Editing)
+// Slice 4B: Advanced Approval UI — granular toggles, bucket selector, sandbox validation
 import { useState, useEffect } from "react";
 import { invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
@@ -15,14 +16,31 @@ import {
   confidenceLabel,
   ACTION_ICONS,
   ACTION_LABELS,
+  defaultFieldApprovals,
+  toggleField,
+  applyFieldApprovals,
+  reassignBucket,
+  validateEditedPath,
+  type ItemFieldApprovals,
+  type BucketOption,
 } from "../lib/approval";
+
+interface Settings {
+  sandbox_folders: string[];
+  first_run: boolean;
+  buckets: { id: string; name: string; path: string }[];
+}
 
 export default function ApprovalView() {
   const [plan, setPlan] = useState<CleanupPlan | null>(null);
   const [approved, setApproved] = useState<Set<string>>(new Set());
   const [advancedMode, setAdvancedMode] = useState(false);
+  const [fieldApprovals, setFieldApprovals] = useState<ItemFieldApprovals>({});
   const [editingId, setEditingId] = useState<string | null>(null);
   const [editValue, setEditValue] = useState("");
+  const [editError, setEditError] = useState("");
+  const [buckets, setBuckets] = useState<BucketOption[]>([]);
+  const [sandboxFolders, setSandboxFolders] = useState<string[]>([]);
   const [executing, setExecuting] = useState(false);
   const [message, setMessage] = useState("");
 
@@ -31,6 +49,7 @@ export default function ApprovalView() {
     const unlisten = listen<CleanupPlan>("cleanup_plan_ready", (e) => {
       setPlan(e.payload);
       setApproved(new Set());
+      setFieldApprovals(defaultFieldApprovals(e.payload.items));
       setMessage("");
     });
     return () => { unlisten.then((f) => f()); };
@@ -39,6 +58,13 @@ export default function ApprovalView() {
   // ponytail: try loading existing plan on mount (for dev without event)
   useEffect(() => {
     invoke<CleanupPlan>("get_cleanup_plan").catch(() => {});
+    // Load settings for buckets + sandbox folders
+    invoke<Settings>("get_settings")
+      .then((s) => {
+        setSandboxFolders(s.sandbox_folders);
+        setBuckets(s.buckets.map((b) => ({ id: b.id, name: b.name, path: b.path })));
+      })
+      .catch(() => {});
   }, []);
 
   const items = plan?.items ?? [];
@@ -52,9 +78,13 @@ export default function ApprovalView() {
     setExecuting(true);
     setMessage("");
     try {
+      // Apply field approvals (advanced mode granular toggles)
+      const finalItems = approvedItems.map((i) =>
+        applyFieldApprovals(i, fieldApprovals[i.file_id]),
+      );
       const result = await invoke<string>("approve_and_clean", {
         request: {
-          proposals: approvedItems.map((i) => ({
+          proposals: finalItems.map((i) => ({
             file_id: i.file_id,
             original_filename: i.original_filename,
             current_path: i.current_path,
@@ -68,6 +98,7 @@ export default function ApprovalView() {
       });
       setMessage(result);
       setApproved(new Set());
+      setFieldApprovals({});
     } catch (err) {
       setMessage(`Error: ${err}`);
     } finally {
@@ -78,10 +109,17 @@ export default function ApprovalView() {
   const startEdit = (item: CleanupItem) => {
     setEditingId(item.file_id);
     setEditValue(effectivePath(item));
+    setEditError("");
   };
 
   const saveEdit = () => {
     if (!plan || !editingId) return;
+    // Validate edited path against sandbox
+    const validation = validateEditedPath(editValue, sandboxFolders);
+    if (!validation.valid) {
+      setEditError(validation.error ?? "Invalid path");
+      return;
+    }
     setPlan({
       ...plan,
       items: plan.items.map((i) =>
@@ -90,11 +128,24 @@ export default function ApprovalView() {
     });
     setEditingId(null);
     setEditValue("");
+    setEditError("");
   };
 
   const cancelEdit = () => {
     setEditingId(null);
     setEditValue("");
+    setEditError("");
+  };
+
+  const handleReassign = (item: CleanupItem, bucket: BucketOption) => {
+    if (!plan) return;
+    const updated = reassignBucket(item, bucket);
+    setPlan({
+      ...plan,
+      items: plan.items.map((i) =>
+        i.file_id === item.file_id ? updated : i,
+      ),
+    });
   };
 
   // Empty state
@@ -187,6 +238,7 @@ export default function ApprovalView() {
                       />
                       <button className="small" onClick={saveEdit}>Save</button>
                       <button className="small" onClick={cancelEdit}>Cancel</button>
+                      {editError && <span className="edit-error">⚠️ {editError}</span>}
                     </div>
                   ) : (
                     <div>
@@ -204,9 +256,40 @@ export default function ApprovalView() {
                   )}
                 </div>
 
-                {/* Advanced mode: granular controls */}
+                {/* Advanced mode: granular controls + bucket selector */}
                 {advancedMode && (
                   <div className="advanced-controls">
+                    {/* Granular checkboxes per ADR 0005 */}
+                    <div className="granular-toggles">
+                      <label className="field-toggle">
+                        <input
+                          type="checkbox"
+                          checked={fieldApprovals[item.file_id]?.move ?? true}
+                          onChange={() => setFieldApprovals(toggleField(fieldApprovals, item.file_id, "move"))}
+                        />
+                        Move
+                      </label>
+                      <label className="field-toggle">
+                        <input
+                          type="checkbox"
+                          checked={fieldApprovals[item.file_id]?.tags ?? true}
+                          onChange={() => setFieldApprovals(toggleField(fieldApprovals, item.file_id, "tags"))}
+                        />
+                        Tags
+                      </label>
+                      {item.faces_detected.length > 0 && (
+                        <label className="field-toggle">
+                          <input
+                            type="checkbox"
+                            checked={fieldApprovals[item.file_id]?.faces ?? true}
+                            onChange={() => setFieldApprovals(toggleField(fieldApprovals, item.file_id, "faces"))}
+                          />
+                          Faces
+                        </label>
+                      )}
+                    </div>
+
+                    {/* Tags display */}
                     <div className="tags-row">
                       <span className="advanced-label">Tags:</span>
                       {item.proposed_tags.map((tag) => (
@@ -214,12 +297,34 @@ export default function ApprovalView() {
                       ))}
                       {item.proposed_tags.length === 0 && <span className="muted">none</span>}
                     </div>
+
+                    {/* Faces display */}
                     {item.faces_detected.length > 0 && (
                       <div className="faces-row">
                         <span className="advanced-label">Faces:</span>
                         {item.faces_detected.map((f) => (
                           <span key={f} className="tag">{f}</span>
                         ))}
+                      </div>
+                    )}
+
+                    {/* Bucket selector dropdown for reallocation */}
+                    {buckets.length > 0 && (
+                      <div className="bucket-selector">
+                        <span className="advanced-label">Reassign to:</span>
+                        <select
+                          defaultValue=""
+                          onChange={(e) => {
+                            const bucket = buckets.find((b) => b.id === e.target.value);
+                            if (bucket) handleReassign(item, bucket);
+                            e.target.value = "";
+                          }}
+                        >
+                          <option value="" disabled>Choose bucket…</option>
+                          {buckets.map((b) => (
+                            <option key={b.id} value={b.id}>{b.name}</option>
+                          ))}
+                        </select>
                       </div>
                     )}
                   </div>
