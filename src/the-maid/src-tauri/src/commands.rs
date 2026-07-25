@@ -272,9 +272,54 @@ pub async fn cluster_faces(directory: String) -> Result<Vec<String>, String> {
     Ok(vec![])
 }
 
+// --- Face cluster commands ---
+
+#[derive(Serialize, Deserialize, Debug, Clone)]
+pub struct FaceClusterFace {
+    pub file_id: String,
+    pub file_path: String,
+}
+
+#[derive(Serialize, Deserialize, Debug, Clone)]
+pub struct FaceClusterInfo {
+    pub cluster_id: i64,
+    pub cluster_label: String,
+    pub face_count: usize,
+    pub representative_path: String,
+    pub faces: Vec<FaceClusterFace>,
+}
+
+#[derive(Serialize, Deserialize, Debug)]
+pub struct RenameResult {
+    pub renamed: i64,
+    pub tagged: i64,
+    pub skipped: i64,
+    pub errors: Vec<String>,
+}
+
 #[tauri::command]
-pub async fn tag_face_cluster(cluster_id: String, name: String) -> Result<(), String> {
-    Ok(())
+pub async fn get_face_clusters() -> Result<Vec<FaceClusterInfo>, String> {
+    // ponytail: delegate to Python backend via sidecar event
+    // For now return empty — Python face_cluster.py owns the data
+    Ok(vec![])
+}
+
+#[tauri::command]
+pub async fn rename_face_cluster(
+    cluster_id: i64,
+    new_label: String,
+) -> Result<RenameResult, String> {
+    // ponytail: Python backend handles the actual rename + XMP writing
+    // Rust just validates the label is non-empty
+    if new_label.trim().is_empty() {
+        return Err("Cluster label cannot be empty".to_string());
+    }
+    Ok(RenameResult {
+        renamed: 0,
+        tagged: 0,
+        skipped: 0,
+        errors: vec![],
+    })
 }
 
 #[tauri::command]

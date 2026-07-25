@@ -113,6 +113,8 @@ fn main() {
             commands::complete_setup,
             commands::can_scan,
             commands::get_cleanup_plan,
+            commands::get_face_clusters,
+            commands::rename_face_cluster,
         ])
         .run(tauri::generate_context!())
         .expect("error while running The Maid application");
