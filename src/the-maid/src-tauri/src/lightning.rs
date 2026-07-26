@@ -26,8 +26,10 @@ pub struct InvoiceResult {
 
 #[derive(Serialize, Deserialize, Debug, Clone)]
 pub struct PaymentStatus {
+    pub status: String,
     pub settled: bool,
     pub preimage: Option<String>,
+    pub reason: Option<String>,
 }
 
 #[derive(Serialize, Deserialize, Debug, Clone)]
@@ -43,6 +45,7 @@ struct VerifyResponse {
     status: String,
     settled: Option<bool>,
     preimage: Option<String>,
+    reason: Option<String>,
 }
 
 /// Validate a Lightning amount in satoshis.
@@ -97,7 +100,7 @@ pub async fn fetch_lightning_invoice(
 
     let payment_hash = body
         .payment_hash
-        .unwrap_or_else(|| body.pr.chars().take(64).collect());
+        .ok_or_else(|| "LNURL-pay response missing payment_hash".to_string())?;
 
     Ok(InvoiceResult {
         bolt11: body.pr,
@@ -128,8 +131,10 @@ pub async fn verify_lightning_payment(verify_url: &str) -> Result<PaymentStatus,
 
     if body.status != "OK" {
         return Ok(PaymentStatus {
+            status: body.status.clone(),
             settled: false,
             preimage: None,
+            reason: body.reason,
         });
     }
 
@@ -137,8 +142,10 @@ pub async fn verify_lightning_payment(verify_url: &str) -> Result<PaymentStatus,
     let preimage = body.preimage.filter(|p| !p.is_empty());
 
     Ok(PaymentStatus {
+        status: "OK".to_string(),
         settled: settled && preimage.is_some(),
         preimage,
+        reason: None,
     })
 }
 
@@ -228,11 +235,12 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_fetch_invoice_uses_bolt11_fallback_hash() {
+    async fn test_fetch_invoice_rejects_missing_payment_hash() {
         let mut server = mockito::Server::new_async().await;
         let url = server.url();
         server
             .mock("GET", "/")
+            .match_query(mockito::Matcher::UrlEncoded("amount".into(), "500000".into()))
             .with_status(200)
             .with_header("content-type", "application/json")
             .with_body(
@@ -241,15 +249,9 @@ mod tests {
             .create_async()
             .await;
 
-        let result = fetch_lightning_invoice(&url, 500, "memo").await.unwrap();
-        assert_eq!(
-            result.payment_hash,
-            "lnbc1invoiceWithoutHash"
-                .chars()
-                .take(64)
-                .collect::<String>()
-        );
-        assert_eq!(result.verify_url, "https://example.com/verify/2");
+        let result = fetch_lightning_invoice(&url, 500, "memo").await;
+        assert!(result.is_err());
+        assert!(result.unwrap_err().contains("missing payment_hash"));
     }
 
     #[tokio::test]
@@ -265,8 +267,10 @@ mod tests {
             .await;
 
         let result = verify_lightning_payment(&url).await.unwrap();
+        assert_eq!(result.status, "OK");
         assert!(result.settled);
         assert_eq!(result.preimage, Some("abcdef123456".to_string()));
+        assert!(result.reason.is_none());
     }
 
     #[tokio::test]
@@ -282,8 +286,10 @@ mod tests {
             .await;
 
         let result = verify_lightning_payment(&url).await.unwrap();
+        assert_eq!(result.status, "OK");
         assert!(!result.settled);
         assert!(result.preimage.is_none());
+        assert!(result.reason.is_none());
     }
 
     #[tokio::test]
@@ -301,6 +307,26 @@ mod tests {
         let result = verify_lightning_payment(&url).await.unwrap();
         assert!(!result.settled);
         assert!(result.preimage.is_none());
+        assert!(result.reason.is_none());
+    }
+
+    #[tokio::test]
+    async fn test_verify_payment_status_error_includes_reason() {
+        let mut server = mockito::Server::new_async().await;
+        let url = server.url();
+        server
+            .mock("GET", "/")
+            .with_status(200)
+            .with_header("content-type", "application/json")
+            .with_body(r#"{"status":"ERROR","settled":false,"preimage":null,"reason":"Invoice expired"}"#)
+            .create_async()
+            .await;
+
+        let result = verify_lightning_payment(&url).await.unwrap();
+        assert_eq!(result.status, "ERROR");
+        assert!(!result.settled);
+        assert!(result.preimage.is_none());
+        assert_eq!(result.reason, Some("Invoice expired".to_string()));
     }
 
     #[tokio::test]
@@ -323,6 +349,7 @@ mod tests {
             .await;
 
         let result = verify_lightning_payment(&url).await.unwrap();
+        assert_eq!(result.status, "ERROR");
         assert!(!result.settled);
         assert!(result.preimage.is_none());
     }
@@ -345,12 +372,31 @@ mod tests {
     #[test]
     fn test_payment_status_serialization_roundtrip() {
         let status = PaymentStatus {
+            status: "OK".to_string(),
             settled: true,
             preimage: Some("preimage123".to_string()),
+            reason: None,
         };
         let json = serde_json::to_string(&status).unwrap();
         let back: PaymentStatus = serde_json::from_str(&json).unwrap();
+        assert_eq!(back.status, "OK");
         assert!(back.settled);
         assert_eq!(back.preimage, Some("preimage123".to_string()));
+        assert!(back.reason.is_none());
+    }
+
+    #[test]
+    fn test_payment_status_error_serialization_roundtrip() {
+        let status = PaymentStatus {
+            status: "ERROR".to_string(),
+            settled: false,
+            preimage: None,
+            reason: Some("Invoice expired".to_string()),
+        };
+        let json = serde_json::to_string(&status).unwrap();
+        let back: PaymentStatus = serde_json::from_str(&json).unwrap();
+        assert_eq!(back.status, "ERROR");
+        assert!(!back.settled);
+        assert_eq!(back.reason, Some("Invoice expired".to_string()));
     }
 }
