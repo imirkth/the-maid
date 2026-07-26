@@ -107,6 +107,7 @@ fn main() {
             commands::write_metadata,
             commands::cluster_faces,
             lightning::create_lightning_invoice,
+            lightning::verify_lightning_payment_cmd,
             commands::ping_backend,
             commands::get_settings,
             commands::save_settings,

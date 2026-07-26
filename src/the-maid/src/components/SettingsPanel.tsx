@@ -11,10 +11,15 @@ import {
   downloadedCount,
 } from "../lib/settings";
 import {
+  type LightningInvoice,
   validateDonationAmount,
   formatAmountSats,
   truncateInvoice,
   generateInvoiceQrDataUrl,
+  parseBolt11Expiry,
+  isInvoiceExpired,
+  formatExpiryCountdown,
+  DEFAULT_POLL_INTERVAL_MS,
 } from "../lib/donation";
 
 // ponytail: ADR 0010 — donation URL, no DRM
@@ -22,12 +27,9 @@ const DONATE_URL = "https://themaid.app/donate";
 
 type Section = "folders" | "models" | "updates" | "about";
 
-interface LightningInvoiceUi {
-  bolt11: string;
-  payment_hash: string;
-  amount_sats: number;
-  expires_at?: string;
+interface InvoiceWithQr extends LightningInvoice {
   qr_data_url?: string;
+  expiry?: number; // Unix seconds
 }
 
 
@@ -44,9 +46,11 @@ export default function SettingsPanel() {
 
   // Lightning donation state
   const [donationAmount, setDonationAmount] = useState(1000);
-  const [invoice, setInvoice] = useState<LightningInvoiceUi | null>(null);
+  const [invoice, setInvoice] = useState<InvoiceWithQr | null>(null);
   const [donationLoading, setDonationLoading] = useState(false);
   const [donationError, setDonationError] = useState("");
+  const [paid, setPaid] = useState(false);
+  const [countdown, setCountdown] = useState("");
 
   useEffect(() => {
     invoke<Settings>("get_settings").then(setSettings);
@@ -96,7 +100,9 @@ export default function SettingsPanel() {
 
   const createInvoice = async () => {
     setInvoice(null);
+    setPaid(false);
     setDonationError("");
+    setCountdown("");
     const validation = validateDonationAmount(donationAmount);
     if (!validation.valid) {
       setDonationError(validation.error || "Invalid amount");
@@ -104,18 +110,65 @@ export default function SettingsPanel() {
     }
     setDonationLoading(true);
     try {
-      const result = await invoke<LightningInvoiceUi>("create_lightning_invoice", {
+      const result = await invoke<LightningInvoice>("create_lightning_invoice", {
         amount_sats: donationAmount,
         memo: "Support The Maid",
       });
       const qr_data_url = await generateInvoiceQrDataUrl(result.bolt11);
-      setInvoice({ ...result, qr_data_url });
+      const expiry = result.expires_at
+        ? Math.floor(new Date(result.expires_at).getTime() / 1000)
+        : parseBolt11Expiry(result.bolt11) ?? undefined;
+      setInvoice({ ...result, qr_data_url, expiry });
     } catch (e) {
       setDonationError(String(e));
     } finally {
       setDonationLoading(false);
     }
   };
+
+  // Poll LNURL-verify endpoint every 5s until paid or expired.
+  useEffect(() => {
+    if (!invoice?.verify_url || paid) return;
+
+    const poll = async () => {
+      try {
+        const status = await invoke<{ settled: boolean; preimage?: string }>(
+          "verify_lightning_payment_cmd",
+          { verify_url: invoice.verify_url }
+        );
+        if (status.settled && status.preimage) {
+          setPaid(true);
+        }
+      } catch (e) {
+        // Swallow polling errors; keep trying until expiry.
+        console.error("Donation verify poll failed:", e);
+      }
+    };
+
+    const timer = setInterval(poll, DEFAULT_POLL_INTERVAL_MS);
+    // immediate first poll
+    poll();
+
+    return () => clearInterval(timer);
+  }, [invoice?.verify_url, paid]);
+
+  // Update expiry countdown every second.
+  useEffect(() => {
+    if (!invoice?.expiry || paid) {
+      setCountdown("");
+      return;
+    }
+    const update = () => {
+      if (isInvoiceExpired(invoice.expiry!)) {
+        setCountdown("Expired");
+      } else {
+        setCountdown(formatExpiryCountdown(invoice.expiry!));
+      }
+    };
+    update();
+    const timer = setInterval(update, 1000);
+    return () => clearInterval(timer);
+  }, [invoice?.expiry, paid]);
 
   const copyInvoice = () => {
     if (invoice?.bolt11) {
@@ -255,17 +308,19 @@ export default function SettingsPanel() {
                 step={1}
                 value={donationAmount}
                 onChange={(e) => setDonationAmount(Number(e.target.value))}
+                disabled={donationLoading || paid}
               />
-              <button onClick={createInvoice} disabled={donationLoading}>
-                {donationLoading ? "Creating…" : "Generate Invoice"}
+              <button onClick={createInvoice} disabled={donationLoading || paid}>
+                {donationLoading ? "Creating…" : paid ? "Paid ✓" : "Generate Invoice"}
               </button>
             </div>
 
             {donationError && <div className="error">⚠️ {donationError}</div>}
 
-            {invoice && (
+            {invoice && !paid && (
               <div className="donation-invoice">
                 <p>Pay {formatAmountSats(invoice.amount_sats)}</p>
+                {countdown && <p className="donation-expiry">Expires in {countdown}</p>}
                 {invoice.qr_data_url && (
                   <img
                     src={invoice.qr_data_url}
@@ -275,6 +330,13 @@ export default function SettingsPanel() {
                 )}
                 <pre className="donation-bolt11">{truncateInvoice(invoice.bolt11, 60)}</pre>
                 <button onClick={copyInvoice}>Copy Invoice</button>
+              </div>
+            )}
+
+            {paid && (
+              <div className="donation-thank-you">
+                <p>✨ Thank you for supporting The Maid!</p>
+                <p>Payment confirmed.</p>
               </div>
             )}
           </div>

@@ -11,32 +11,39 @@ const DONATION_LNURL: &str = env!(
     "https://PLACEHOLDER.themaid.app/lnurl-pay"
 );
 
+const DEFAULT_MEMO: &str = "Support The Maid";
+const MAX_AMOUNT_SATS: u64 = 10_000_000;
+const MIN_AMOUNT_SATS: u64 = 1;
+
 #[derive(Serialize, Deserialize, Debug, Clone)]
 pub struct InvoiceResult {
     pub bolt11: String,
     pub payment_hash: String,
     pub amount_sats: u64,
+    pub verify_url: String,
     pub expires_at: Option<String>,
 }
 
 #[derive(Serialize, Deserialize, Debug, Clone)]
-pub struct LnurlPayResponse {
-    pub callback: String,
-    pub max_sendable: u64,
-    pub min_sendable: u64,
-    pub metadata: String,
-    pub tag: String,
+pub struct PaymentStatus {
+    pub settled: bool,
+    pub preimage: Option<String>,
 }
 
 #[derive(Serialize, Deserialize, Debug, Clone)]
-pub struct InvoiceResponse {
-    pub pr: String,
-    pub routes: Option<Vec<serde_json::Value>>,
+struct CallbackResponse {
+    pr: String,
+    payment_hash: Option<String>,
+    verify: Option<String>,
+    expires_at: Option<String>,
 }
 
-const DEFAULT_MEMO: &str = "Support The Maid";
-const MAX_AMOUNT_SATS: u64 = 10_000_000;
-const MIN_AMOUNT_SATS: u64 = 1;
+#[derive(Serialize, Deserialize, Debug, Clone)]
+struct VerifyResponse {
+    status: String,
+    settled: Option<bool>,
+    preimage: Option<String>,
+}
 
 /// Validate a Lightning amount in satoshis.
 fn validate_amount(amount_sats: u64) -> Result<(), String> {
@@ -52,28 +59,28 @@ fn validate_amount(amount_sats: u64) -> Result<(), String> {
     Ok(())
 }
 
-/// Fetch an invoice from a user-configured Lightning node URL.
-/// Supports LNURL-pay endpoints (callback + amount query) and simple
-/// invoice endpoints that return `{"pr": "..."}`.
+fn http_client() -> Result<reqwest::Client, String> {
+    reqwest::Client::builder()
+        .timeout(std::time::Duration::from_secs(15))
+        .build()
+        .map_err(|e| format!("Failed to create HTTP client: {}", e))
+}
+
+/// Fetch an invoice from a LNURL-pay callback URL.
+/// The configured URL is treated as the callback; we call `callback?amount=<msats>`.
 pub async fn fetch_lightning_invoice(
-    node_url: &str,
+    callback_url: &str,
     amount_sats: u64,
-    memo: &str,
+    _memo: &str,
 ) -> Result<InvoiceResult, String> {
     validate_amount(amount_sats)?;
 
-    let client = reqwest::Client::builder()
-        .timeout(std::time::Duration::from_secs(15))
-        .build()
-        .map_err(|e| format!("Failed to create HTTP client: {}", e))?;
-
-    // Try LNURL-pay callback first: if URL contains `callback` semantics, query
-    // `?amount=<msats>`. Many LNURL-pay callbacks also accept a `comment`.
+    let client = http_client()?;
     let msats = amount_sats * 1000;
-    let callback_url = format!("{}?amount={}", node_url.trim_end_matches('/'), msats);
+    let url = format!("{}?amount={}", callback_url.trim_end_matches('/'), msats);
 
     let resp = client
-        .get(&callback_url)
+        .get(&url)
         .send()
         .await
         .map_err(|e| format!("Failed to contact Lightning node: {}", e))?;
@@ -82,37 +89,59 @@ pub async fn fetch_lightning_invoice(
         return Err(format!("Lightning node returned status {}", resp.status()));
     }
 
-    let body: serde_json::Value = resp
+    let body: CallbackResponse = resp
         .json()
         .await
         .map_err(|e| format!("Failed to parse node response: {}", e))?;
 
-    let pr = body
-        .get("pr")
-        .and_then(|v| v.as_str())
-        .ok_or_else(|| "Node response missing bolt11 invoice (pr field)".to_string())?
-        .to_string();
+    let verify_url = body
+        .verify
+        .ok_or_else(|| "LNURL-pay response missing verify URL".to_string())?;
 
-    // Extract payment_hash if provided, otherwise derive a placeholder from the invoice.
     let payment_hash = body
-        .get("payment_hash")
-        .and_then(|v| v.as_str())
-        .map(|s| s.to_string())
-        .unwrap_or_else(|| {
-            // LNURL-pay usually doesn't include payment_hash. Use the first 64 hex chars
-            // of the bolt11 as a stable identifier for polling. This is not a real hash,
-            // but it lets the frontend track the same invoice request.
-            pr.chars().take(64).collect()
-        });
+        .payment_hash
+        .unwrap_or_else(|| body.pr.chars().take(64).collect());
 
     Ok(InvoiceResult {
-        bolt11: pr,
+        bolt11: body.pr,
         payment_hash,
         amount_sats,
-        expires_at: body
-            .get("expires_at")
-            .and_then(|v| v.as_str())
-            .map(|s| s.to_string()),
+        verify_url,
+        expires_at: body.expires_at,
+    })
+}
+
+/// Poll the LNURL-verify URL to check if the invoice has been paid.
+pub async fn verify_lightning_payment(verify_url: &str) -> Result<PaymentStatus, String> {
+    let client = http_client()?;
+    let resp = client
+        .get(verify_url)
+        .send()
+        .await
+        .map_err(|e| format!("Failed to contact verify endpoint: {}", e))?;
+
+    if !resp.status().is_success() {
+        return Err(format!("Verify endpoint returned status {}", resp.status()));
+    }
+
+    let body: VerifyResponse = resp
+        .json()
+        .await
+        .map_err(|e| format!("Failed to parse verify response: {}", e))?;
+
+    if body.status != "OK" {
+        return Ok(PaymentStatus {
+            settled: false,
+            preimage: None,
+        });
+    }
+
+    let settled = body.settled.unwrap_or(false);
+    let preimage = body.preimage.filter(|p| !p.is_empty());
+
+    Ok(PaymentStatus {
+        settled: settled && preimage.is_some(),
+        preimage,
     })
 }
 
@@ -122,11 +151,17 @@ pub async fn create_lightning_invoice(
     amount_sats: u64,
     memo: Option<String>,
 ) -> Result<InvoiceResult, String> {
-    let memo = memo.unwrap_or_else(|| DEFAULT_MEMO.to_string());
+    let _memo = memo.unwrap_or_else(|| DEFAULT_MEMO.to_string());
     if DONATION_LNURL.contains("PLACEHOLDER") {
         return Err("Donation endpoint not configured in this build".to_string());
     }
-    fetch_lightning_invoice(DONATION_LNURL, amount_sats, &memo).await
+    fetch_lightning_invoice(DONATION_LNURL, amount_sats, &_memo).await
+}
+
+/// Tauri command: poll the LNURL-verify URL and return payment status.
+#[tauri::command]
+pub async fn verify_lightning_payment_cmd(verify_url: String) -> Result<PaymentStatus, String> {
+    verify_lightning_payment(&verify_url).await
 }
 
 #[cfg(test)]
@@ -156,20 +191,20 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_fetch_invoice_missing_pr_field() {
+    async fn test_fetch_invoice_missing_verify_url() {
         let mut server = mockito::Server::new_async().await;
         let url = server.url();
         server
             .mock("GET", "/")
             .with_status(200)
             .with_header("content-type", "application/json")
-            .with_body(r#"{"status":"OK"}"#)
+            .with_body(r#"{"pr":"lnbc10u1p invoice"}"#)
             .create_async()
             .await;
 
         let result = fetch_lightning_invoice(&url, 1000, "memo").await;
         assert!(result.is_err());
-        assert!(result.unwrap_err().contains("missing bolt11"));
+        assert!(result.unwrap_err().contains("missing verify URL"));
     }
 
     #[tokio::test]
@@ -181,7 +216,7 @@ mod tests {
             .match_query(mockito::Matcher::UrlEncoded("amount".into(), "1000000".into()))
             .with_status(200)
             .with_header("content-type", "application/json")
-            .with_body(r#"{"pr":"lnbc10u1p lightning invoice","payment_hash":"abcdef123456"}"#)
+            .with_body(r#"{"pr":"lnbc10u1p lightning invoice","payment_hash":"abcdef123456","verify":"https://example.com/verify/1","expires_at":"2026-12-31T23:59:59Z"}"#)
             .create_async()
             .await;
 
@@ -189,6 +224,8 @@ mod tests {
         assert_eq!(result.amount_sats, 1000);
         assert_eq!(result.bolt11, "lnbc10u1p lightning invoice");
         assert_eq!(result.payment_hash, "abcdef123456");
+        assert_eq!(result.verify_url, "https://example.com/verify/1");
+        assert_eq!(result.expires_at, Some("2026-12-31T23:59:59Z".to_string()));
     }
 
     #[tokio::test]
@@ -199,12 +236,64 @@ mod tests {
             .mock("GET", "/")
             .with_status(200)
             .with_header("content-type", "application/json")
-            .with_body(r#"{"pr":"lnbc1invoiceWithoutHash"}"#)
+            .with_body(r#"{"pr":"lnbc1invoiceWithoutHash","verify":"https://example.com/verify/2"}"#)
             .create_async()
             .await;
 
         let result = fetch_lightning_invoice(&url, 500, "memo").await.unwrap();
         assert_eq!(result.payment_hash, "lnbc1invoiceWithoutHash".chars().take(64).collect::<String>());
+        assert_eq!(result.verify_url, "https://example.com/verify/2");
+    }
+
+    #[tokio::test]
+    async fn test_verify_payment_settled_with_preimage() {
+        let mut server = mockito::Server::new_async().await;
+        let url = server.url();
+        server
+            .mock("GET", "/")
+            .with_status(200)
+            .with_header("content-type", "application/json")
+            .with_body(r#"{"status":"OK","settled":true,"preimage":"abcdef123456"}"#)
+            .create_async()
+            .await;
+
+        let result = verify_lightning_payment(&url).await.unwrap();
+        assert!(result.settled);
+        assert_eq!(result.preimage, Some("abcdef123456".to_string()));
+    }
+
+    #[tokio::test]
+    async fn test_verify_payment_not_settled() {
+        let mut server = mockito::Server::new_async().await;
+        let url = server.url();
+        server
+            .mock("GET", "/")
+            .with_status(200)
+            .with_header("content-type", "application/json")
+            .with_body(r#"{"status":"OK","settled":false,"preimage":null}"#)
+            .create_async()
+            .await;
+
+        let result = verify_lightning_payment(&url).await.unwrap();
+        assert!(!result.settled);
+        assert!(result.preimage.is_none());
+    }
+
+    #[tokio::test]
+    async fn test_verify_payment_missing_preimage_not_settled() {
+        let mut server = mockito::Server::new_async().await;
+        let url = server.url();
+        server
+            .mock("GET", "/")
+            .with_status(200)
+            .with_header("content-type", "application/json")
+            .with_body(r#"{"status":"OK","settled":true,"preimage":""}"#)
+            .create_async()
+            .await;
+
+        let result = verify_lightning_payment(&url).await.unwrap();
+        assert!(!result.settled);
+        assert!(result.preimage.is_none());
     }
 
     #[tokio::test]

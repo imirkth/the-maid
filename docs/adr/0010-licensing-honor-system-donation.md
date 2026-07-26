@@ -24,7 +24,24 @@ One-time $30–$50 purchase. Need license enforcement without server infrastruct
 - Purchase flow: simple Stripe checkout → download link → no key required.
 - "Enter license key" screen removed entirely.
 - Settings include "Support The Maid" → donation page.
-- Lightning donation option added: vendor's LNURL-pay endpoint is baked into the release binary at build time (`MAID_DONATION_LNURL`). Users enter an amount, the app fetches a bolt11 invoice from the vendor's node, and displays a QR. Users cannot redirect payments to another node.
+- Lightning donation option added: vendor's LNURL-pay endpoint is baked into the release binary at build time (`MAID_DONATION_LNURL`). Users enter an amount, the app fetches a bolt11 invoice from the vendor's node, polls the LNURL-verify URL until expiry, and displays a QR. Users cannot redirect payments to another node.
+
+## Build Configuration
+
+Set the vendor's LNURL-pay URL at build time:
+
+```bash
+MAID_DONATION_LNURL=https://getalby.com/.well-known/lnurlp/<your-username> \
+  cargo tauri build
+```
+
+Recommended hosted wallet: **Alby**. Steps:
+1. Create an Alby account at https://getalby.com.
+2. Enable your Lightning Address / LNURL-pay URL.
+3. Use the raw LNURL-pay URL (not the `user@domain` form) as `MAID_DONATION_LNURL`.
+4. Sweep donations from Alby to your LND node on a schedule (daily/weekly).
+
+If `MAID_DONATION_LNURL` is not configured, the app returns an error when the user tries to generate an invoice.
 - Upgrade announcements go to all users regardless of payment status.
 
 ## Future
