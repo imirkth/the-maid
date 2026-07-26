@@ -13,7 +13,6 @@ import {
 import {
   validateDonationAmount,
   formatAmountSats,
-  isValidLightningUrl,
   truncateInvoice,
   generateInvoiceQrDataUrl,
 } from "../lib/donation";
@@ -48,14 +47,9 @@ export default function SettingsPanel() {
   const [invoice, setInvoice] = useState<LightningInvoiceUi | null>(null);
   const [donationLoading, setDonationLoading] = useState(false);
   const [donationError, setDonationError] = useState("");
-  const [nodeUrl, setNodeUrl] = useState("");
-  const [nodeUrlSaved, setNodeUrlSaved] = useState(false);
 
   useEffect(() => {
-    invoke<Settings>("get_settings").then((s) => {
-      setSettings(s);
-      setNodeUrl(s.lightning_node_url || "");
-    });
+    invoke<Settings>("get_settings").then(setSettings);
     invoke<ModelStatus[]>("get_model_status").then(setModels);
     invoke<string>("get_app_version").then(setAppVersion);
   }, []);
@@ -100,34 +94,12 @@ export default function SettingsPanel() {
       });
   };
 
-  const saveNodeUrl = () => {
-    if (!settings) return;
-    const trimmed = nodeUrl.trim();
-    if (trimmed.length > 0 && !isValidLightningUrl(trimmed)) {
-      setDonationError("Invalid Lightning node URL");
-      return;
-    }
-    setDonationError("");
-    const next: Settings = { ...settings, lightning_node_url: trimmed || undefined };
-    invoke("save_settings", { settings: next })
-      .then(() => {
-        setSettings(next);
-        setNodeUrlSaved(true);
-        setTimeout(() => setNodeUrlSaved(false), 2000);
-      })
-      .catch((e) => setDonationError(String(e)));
-  };
-
   const createInvoice = async () => {
     setInvoice(null);
     setDonationError("");
     const validation = validateDonationAmount(donationAmount);
     if (!validation.valid) {
       setDonationError(validation.error || "Invalid amount");
-      return;
-    }
-    if (!settings?.lightning_node_url) {
-      setDonationError("Set your Lightning node URL first");
       return;
     }
     setDonationLoading(true);
@@ -273,22 +245,7 @@ export default function SettingsPanel() {
 
           <div className="about-section">
             <h4>Lightning Donation</h4>
-            <p>
-              Pay directly to your own node — or any LNURL-pay endpoint you control.
-              No processor, no tracking.
-            </p>
-            <div className="donation-config">
-              <label>Lightning node / LNURL-pay URL</label>
-              <input
-                type="url"
-                value={nodeUrl}
-                onChange={(e) => setNodeUrl(e.target.value)}
-                placeholder="https://node.example/lnurl-pay"
-              />
-              <button onClick={saveNodeUrl} className="btn-small">
-                {nodeUrlSaved ? "Saved" : "Save"}
-              </button>
-            </div>
+            <p>Pay with Bitcoin Lightning. No processor, no tracking.</p>
 
             <div className="donation-form">
               <label>Amount (sats)</label>

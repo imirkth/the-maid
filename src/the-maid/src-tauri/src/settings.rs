@@ -13,7 +13,6 @@ pub struct Settings {
     pub features: FeatureFlags,
     pub setup_complete: bool,
     pub face_cluster: FaceClusterSettings,
-    pub lightning_node_url: Option<String>,
 }
 
 #[derive(Serialize, Deserialize, Debug, Clone, Default)]
@@ -61,7 +60,6 @@ impl Settings {
             features: FeatureFlags::default(),
             setup_complete: false,
             face_cluster: FaceClusterSettings::new(),
-            lightning_node_url: None,
         }
     }
 

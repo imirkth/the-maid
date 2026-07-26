@@ -30,16 +30,6 @@ export function formatAmountSats(amount: number): string {
   return `${amount.toLocaleString()} sats`;
 }
 
-export function isValidLightningUrl(url: string): boolean {
-  if (!url || url.trim().length === 0) return false;
-  try {
-    const parsed = new URL(url);
-    return parsed.protocol === "http:" || parsed.protocol === "https:";
-  } catch {
-    return false;
-  }
-}
-
 export function truncateInvoice(invoice: string, max = 40): string {
   if (invoice.length <= max) return invoice;
   return invoice.slice(0, max - 1) + "…";

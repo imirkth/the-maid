@@ -2,7 +2,6 @@ import { describe, it, expect } from "vitest";
 import {
   validateDonationAmount,
   formatAmountSats,
-  isValidLightningUrl,
   truncateInvoice,
   generateInvoiceQrDataUrl,
   MIN_DONATION_SATS,
@@ -52,24 +51,6 @@ describe("validateDonationAmount", () => {
 describe("formatAmountSats", () => {
   it("formats with commas", () => {
     expect(formatAmountSats(1234567)).toBe("1,234,567 sats");
-  });
-});
-
-describe("isValidLightningUrl", () => {
-  it("rejects empty", () => {
-    expect(isValidLightningUrl("")).toBe(false);
-  });
-
-  it("rejects non-http", () => {
-    expect(isValidLightningUrl("ftp://node.example/lnurl")).toBe(false);
-  });
-
-  it("accepts https", () => {
-    expect(isValidLightningUrl("https://node.example/lnurl-pay")).toBe(true);
-  });
-
-  it("accepts http", () => {
-    expect(isValidLightningUrl("http://localhost:8080/lnurl")).toBe(true);
   });
 });
 

@@ -1,8 +1,15 @@
 // The Maid — Lightning donation support
-// User's own node backend via LNURL-pay or direct REST endpoint.
-// No third-party payment processor.
+// Donations route to the vendor's own Lightning node / LNURL-pay endpoint.
+// URL is baked in at compile time; users cannot redirect payments.
 
 use serde::{Deserialize, Serialize};
+
+/// LNURL-pay endpoint baked into the release binary.
+/// Set at build time: MAID_DONATION_LNURL=https://your-node.example/lnurl-pay cargo tauri build
+const DONATION_LNURL: &str = env!(
+    "MAID_DONATION_LNURL",
+    "https://PLACEHOLDER.themaid.app/lnurl-pay"
+);
 
 #[derive(Serialize, Deserialize, Debug, Clone)]
 pub struct InvoiceResult {
@@ -109,19 +116,17 @@ pub async fn fetch_lightning_invoice(
     })
 }
 
-/// Tauri command: create a Lightning invoice using the configured node URL.
+/// Tauri command: create a Lightning invoice using the vendor's configured node.
 #[tauri::command]
 pub async fn create_lightning_invoice(
     amount_sats: u64,
     memo: Option<String>,
 ) -> Result<InvoiceResult, String> {
-    use crate::settings::Settings;
-    let settings = Settings::load()?;
-    let node_url = settings
-        .lightning_node_url
-        .ok_or_else(|| "No Lightning node configured. Add your node URL in Settings > About.".to_string())?;
     let memo = memo.unwrap_or_else(|| DEFAULT_MEMO.to_string());
-    fetch_lightning_invoice(&node_url, amount_sats, &memo).await
+    if DONATION_LNURL.contains("PLACEHOLDER") {
+        return Err("Donation endpoint not configured in this build".to_string());
+    }
+    fetch_lightning_invoice(DONATION_LNURL, amount_sats, &memo).await
 }
 
 #[cfg(test)]
@@ -200,5 +205,12 @@ mod tests {
 
         let result = fetch_lightning_invoice(&url, 500, "memo").await.unwrap();
         assert_eq!(result.payment_hash, "lnbc1invoiceWithoutHash".chars().take(64).collect::<String>());
+    }
+
+    #[tokio::test]
+    async fn test_create_lightning_invoice_rejects_placeholder_url() {
+        let result = create_lightning_invoice(1000, Some("memo".to_string())).await;
+        assert!(result.is_err());
+        assert!(result.unwrap_err().contains("not configured"));
     }
 }

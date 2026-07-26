@@ -7,7 +7,6 @@ export interface Settings {
   buckets: { id: string; name: string; path: string }[];
   features: { pdf_ocr: boolean; face_clustering: boolean; general_files: boolean };
   setup_complete: boolean;
-  lightning_node_url?: string;
 }
 
 export interface ModelStatus {
