@@ -10,11 +10,27 @@ import {
   formatStorageUsed,
   downloadedCount,
 } from "../lib/settings";
+import {
+  validateDonationAmount,
+  formatAmountSats,
+  isValidLightningUrl,
+  truncateInvoice,
+  generateInvoiceQrDataUrl,
+} from "../lib/donation";
 
 // ponytail: ADR 0010 — donation URL, no DRM
 const DONATE_URL = "https://themaid.app/donate";
 
 type Section = "folders" | "models" | "updates" | "about";
+
+interface LightningInvoiceUi {
+  bolt11: string;
+  payment_hash: string;
+  amount_sats: number;
+  expires_at?: string;
+  qr_data_url?: string;
+}
+
 
 export default function SettingsPanel() {
   const [section, setSection] = useState<Section>("folders");
@@ -27,8 +43,19 @@ export default function SettingsPanel() {
   const [updateError, setUpdateError] = useState("");
   const [appVersion, setAppVersion] = useState("0.1.0");
 
+  // Lightning donation state
+  const [donationAmount, setDonationAmount] = useState(1000);
+  const [invoice, setInvoice] = useState<LightningInvoiceUi | null>(null);
+  const [donationLoading, setDonationLoading] = useState(false);
+  const [donationError, setDonationError] = useState("");
+  const [nodeUrl, setNodeUrl] = useState("");
+  const [nodeUrlSaved, setNodeUrlSaved] = useState(false);
+
   useEffect(() => {
-    invoke<Settings>("get_settings").then(setSettings);
+    invoke<Settings>("get_settings").then((s) => {
+      setSettings(s);
+      setNodeUrl(s.lightning_node_url || "");
+    });
     invoke<ModelStatus[]>("get_model_status").then(setModels);
     invoke<string>("get_app_version").then(setAppVersion);
   }, []);
@@ -71,6 +98,57 @@ export default function SettingsPanel() {
         setUpdateError(String(e));
         setUpdateChecking(false);
       });
+  };
+
+  const saveNodeUrl = () => {
+    if (!settings) return;
+    const trimmed = nodeUrl.trim();
+    if (trimmed.length > 0 && !isValidLightningUrl(trimmed)) {
+      setDonationError("Invalid Lightning node URL");
+      return;
+    }
+    setDonationError("");
+    const next: Settings = { ...settings, lightning_node_url: trimmed || undefined };
+    invoke("save_settings", { settings: next })
+      .then(() => {
+        setSettings(next);
+        setNodeUrlSaved(true);
+        setTimeout(() => setNodeUrlSaved(false), 2000);
+      })
+      .catch((e) => setDonationError(String(e)));
+  };
+
+  const createInvoice = async () => {
+    setInvoice(null);
+    setDonationError("");
+    const validation = validateDonationAmount(donationAmount);
+    if (!validation.valid) {
+      setDonationError(validation.error || "Invalid amount");
+      return;
+    }
+    if (!settings?.lightning_node_url) {
+      setDonationError("Set your Lightning node URL first");
+      return;
+    }
+    setDonationLoading(true);
+    try {
+      const result = await invoke<LightningInvoiceUi>("create_lightning_invoice", {
+        amount_sats: donationAmount,
+        memo: "Support The Maid",
+      });
+      const qr_data_url = await generateInvoiceQrDataUrl(result.bolt11);
+      setInvoice({ ...result, qr_data_url });
+    } catch (e) {
+      setDonationError(String(e));
+    } finally {
+      setDonationLoading(false);
+    }
+  };
+
+  const copyInvoice = () => {
+    if (invoice?.bolt11) {
+      navigator.clipboard.writeText(invoice.bolt11);
+    }
   };
 
   const openDonate = () => {
@@ -192,6 +270,57 @@ export default function SettingsPanel() {
           <h3>About The Maid</h3>
           <p>Version: v{appVersion}</p>
           <p>Local-first AI file organizer. Your files never leave your machine.</p>
+
+          <div className="about-section">
+            <h4>Lightning Donation</h4>
+            <p>
+              Pay directly to your own node — or any LNURL-pay endpoint you control.
+              No processor, no tracking.
+            </p>
+            <div className="donation-config">
+              <label>Lightning node / LNURL-pay URL</label>
+              <input
+                type="url"
+                value={nodeUrl}
+                onChange={(e) => setNodeUrl(e.target.value)}
+                placeholder="https://node.example/lnurl-pay"
+              />
+              <button onClick={saveNodeUrl} className="btn-small">
+                {nodeUrlSaved ? "Saved" : "Save"}
+              </button>
+            </div>
+
+            <div className="donation-form">
+              <label>Amount (sats)</label>
+              <input
+                type="number"
+                min={1}
+                step={1}
+                value={donationAmount}
+                onChange={(e) => setDonationAmount(Number(e.target.value))}
+              />
+              <button onClick={createInvoice} disabled={donationLoading}>
+                {donationLoading ? "Creating…" : "Generate Invoice"}
+              </button>
+            </div>
+
+            {donationError && <div className="error">⚠️ {donationError}</div>}
+
+            {invoice && (
+              <div className="donation-invoice">
+                <p>Pay {formatAmountSats(invoice.amount_sats)}</p>
+                {invoice.qr_data_url && (
+                  <img
+                    src={invoice.qr_data_url}
+                    alt="Lightning invoice QR"
+                    className="donation-qr"
+                  />
+                )}
+                <pre className="donation-bolt11">{truncateInvoice(invoice.bolt11, 60)}</pre>
+                <button onClick={copyInvoice}>Copy Invoice</button>
+              </div>
+            )}
+          </div>
 
           <div className="about-section">
             <h4>Support The Maid</h4>

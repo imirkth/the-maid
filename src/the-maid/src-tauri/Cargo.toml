@@ -16,6 +16,7 @@ path = "src/main.rs"
 
 [dev-dependencies]
 tempfile = "3"
+mockito = "1"
 
 [build-dependencies]
 tauri-build = { version = "2", features = [] }

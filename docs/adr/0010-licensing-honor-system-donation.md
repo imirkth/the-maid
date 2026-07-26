@@ -24,7 +24,8 @@ One-time $30–$50 purchase. Need license enforcement without server infrastruct
 - Purchase flow: simple Stripe checkout → download link → no key required.
 - "Enter license key" screen removed entirely.
 - Settings include "Support The Maid" → donation page.
+- Lightning donation option added: user can configure their own LNURL-pay / Lightning node endpoint for in-app, self-custodial donations.
 - Upgrade announcements go to all users regardless of payment status.
 
 ## Future
-If revenue leakage becomes critical, revisit with a lightweight server (e.g., Gumroad/LemonSqueezy handles activation).
+If revenue leakage becomes critical, revisit with a lightweight server (e.g., Gumroad/LemonSqueezy handles activation). Keep Lightning as the privacy-first fallback.

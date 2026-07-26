@@ -7,8 +7,11 @@ use std::path::PathBuf;
 use std::sync::Arc;
 
 mod commands;
+mod lightning;
 mod settings;
 mod sidecar;
+
+use lightning::create_lightning_invoice;
 
 use sidecar::{SidecarManager, SidecarEvent};
 
@@ -103,7 +106,7 @@ fn main() {
             commands::get_scan_progress,
             commands::write_metadata,
             commands::cluster_faces,
-            commands::tag_face_cluster,
+            lightning::create_lightning_invoice,
             commands::ping_backend,
             commands::get_settings,
             commands::save_settings,
