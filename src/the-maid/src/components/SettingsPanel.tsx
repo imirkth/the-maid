@@ -18,6 +18,7 @@ import {
   generateInvoiceQrDataUrl,
   parseBolt11Expiry,
   isInvoiceExpired,
+  isPaymentSettled,
   formatExpiryCountdown,
   DEFAULT_POLL_INTERVAL_MS,
 } from "../lib/donation";
@@ -132,11 +133,14 @@ export default function SettingsPanel() {
 
     const poll = async () => {
       try {
-        const status = await invoke<{ settled: boolean; preimage?: string }>(
-          "verify_lightning_payment_cmd",
-          { verify_url: invoice.verify_url }
-        );
-        if (status.settled && status.preimage) {
+        const status = await invoke<{
+          status: string;
+          settled?: boolean;
+          preimage?: string | null;
+        }>("verify_lightning_payment_cmd", {
+          verify_url: invoice.verify_url,
+        });
+        if (isPaymentSettled(status)) {
           setPaid(true);
         }
       } catch (e) {

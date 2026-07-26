@@ -51,10 +51,7 @@ fn validate_amount(amount_sats: u64) -> Result<(), String> {
         return Err(format!("Amount must be at least {} sat", MIN_AMOUNT_SATS));
     }
     if amount_sats > MAX_AMOUNT_SATS {
-        return Err(format!(
-            "Amount exceeds maximum {} sats",
-            MAX_AMOUNT_SATS
-        ));
+        return Err(format!("Amount exceeds maximum {} sats", MAX_AMOUNT_SATS));
     }
     Ok(())
 }
@@ -220,7 +217,9 @@ mod tests {
             .create_async()
             .await;
 
-        let result = fetch_lightning_invoice(&url, 1000, "Support").await.unwrap();
+        let result = fetch_lightning_invoice(&url, 1000, "Support")
+            .await
+            .unwrap();
         assert_eq!(result.amount_sats, 1000);
         assert_eq!(result.bolt11, "lnbc10u1p lightning invoice");
         assert_eq!(result.payment_hash, "abcdef123456");
@@ -236,12 +235,20 @@ mod tests {
             .mock("GET", "/")
             .with_status(200)
             .with_header("content-type", "application/json")
-            .with_body(r#"{"pr":"lnbc1invoiceWithoutHash","verify":"https://example.com/verify/2"}"#)
+            .with_body(
+                r#"{"pr":"lnbc1invoiceWithoutHash","verify":"https://example.com/verify/2"}"#,
+            )
             .create_async()
             .await;
 
         let result = fetch_lightning_invoice(&url, 500, "memo").await.unwrap();
-        assert_eq!(result.payment_hash, "lnbc1invoiceWithoutHash".chars().take(64).collect::<String>());
+        assert_eq!(
+            result.payment_hash,
+            "lnbc1invoiceWithoutHash"
+                .chars()
+                .take(64)
+                .collect::<String>()
+        );
         assert_eq!(result.verify_url, "https://example.com/verify/2");
     }
 
@@ -301,5 +308,49 @@ mod tests {
         let result = create_lightning_invoice(1000, Some("memo".to_string())).await;
         assert!(result.is_err());
         assert!(result.unwrap_err().contains("not configured"));
+    }
+
+    #[tokio::test]
+    async fn test_verify_payment_status_not_ok_returns_unsettled() {
+        let mut server = mockito::Server::new_async().await;
+        let url = server.url();
+        server
+            .mock("GET", "/")
+            .with_status(200)
+            .with_header("content-type", "application/json")
+            .with_body(r#"{"status":"ERROR","settled":false,"preimage":null}"#)
+            .create_async()
+            .await;
+
+        let result = verify_lightning_payment(&url).await.unwrap();
+        assert!(!result.settled);
+        assert!(result.preimage.is_none());
+    }
+
+    #[test]
+    fn test_invoice_result_serialization_roundtrip() {
+        let invoice = InvoiceResult {
+            bolt11: "lnbc10u1p test".to_string(),
+            payment_hash: "abcdef".to_string(),
+            amount_sats: 1000,
+            verify_url: "https://example.com/verify".to_string(),
+            expires_at: Some("2026-12-31T23:59:59Z".to_string()),
+        };
+        let json = serde_json::to_string(&invoice).unwrap();
+        let back: InvoiceResult = serde_json::from_str(&json).unwrap();
+        assert_eq!(back.bolt11, invoice.bolt11);
+        assert_eq!(back.verify_url, invoice.verify_url);
+    }
+
+    #[test]
+    fn test_payment_status_serialization_roundtrip() {
+        let status = PaymentStatus {
+            settled: true,
+            preimage: Some("preimage123".to_string()),
+        };
+        let json = serde_json::to_string(&status).unwrap();
+        let back: PaymentStatus = serde_json::from_str(&json).unwrap();
+        assert!(back.settled);
+        assert_eq!(back.preimage, Some("preimage123".to_string()));
     }
 }

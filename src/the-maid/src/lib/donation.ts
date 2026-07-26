@@ -12,16 +12,15 @@ export interface LightningInvoice {
   bolt11: string;
   payment_hash: string;
   amount_sats: number;
-  verify_url?: string;
+  verify_url: string;
   expires_at?: string;
 }
 
+// ponytail: ADR 0011 — verify response is status + settled + preimage, nothing else.
 export interface VerifyResponse {
   status: string;
   settled?: boolean;
   preimage?: string | null;
-  pr?: string;
-  reason?: string;
 }
 
 export function validateDonationAmount(amount: number): { valid: boolean; error?: string } {
