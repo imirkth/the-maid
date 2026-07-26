@@ -1,6 +1,7 @@
 import { useState, useEffect } from "react";
 import { invoke } from "@tauri-apps/api/core";
 import { openUrl } from "@tauri-apps/plugin-shell";
+import { useDonation } from "../hooks/useDonation";
 import {
   type Settings,
   type ModelStatus,
@@ -10,29 +11,12 @@ import {
   formatStorageUsed,
   downloadedCount,
 } from "../lib/settings";
-import {
-  type LightningInvoice,
-  validateDonationAmount,
-  formatAmountSats,
-  truncateInvoice,
-  generateInvoiceQrDataUrl,
-  parseBolt11Expiry,
-  isInvoiceExpired,
-  isPaymentSettled,
-  formatExpiryCountdown,
-  DEFAULT_POLL_INTERVAL_MS,
-} from "../lib/donation";
+import { formatAmountSats, truncateInvoice } from "../lib/donation";
 
 // ponytail: ADR 0010 — donation URL, no DRM
 const DONATE_URL = "https://themaid.app/donate";
 
 type Section = "folders" | "models" | "updates" | "about";
-
-interface InvoiceWithQr extends LightningInvoice {
-  qr_data_url?: string;
-  expiry?: number; // Unix seconds
-}
-
 
 export default function SettingsPanel() {
   const [section, setSection] = useState<Section>("folders");
@@ -46,12 +30,17 @@ export default function SettingsPanel() {
   const [appVersion, setAppVersion] = useState("0.1.0");
 
   // Lightning donation state
-  const [donationAmount, setDonationAmount] = useState(1000);
-  const [invoice, setInvoice] = useState<InvoiceWithQr | null>(null);
-  const [donationLoading, setDonationLoading] = useState(false);
-  const [donationError, setDonationError] = useState("");
-  const [paid, setPaid] = useState(false);
-  const [countdown, setCountdown] = useState("");
+  const {
+    donationAmount,
+    setDonationAmount,
+    invoice,
+    donationLoading,
+    donationError,
+    paid,
+    countdown,
+    createInvoice,
+    copyInvoice,
+  } = useDonation();
 
   useEffect(() => {
     invoke<Settings>("get_settings").then(setSettings);
@@ -97,87 +86,6 @@ export default function SettingsPanel() {
         setUpdateError(String(e));
         setUpdateChecking(false);
       });
-  };
-
-  const createInvoice = async () => {
-    setInvoice(null);
-    setPaid(false);
-    setDonationError("");
-    setCountdown("");
-    const validation = validateDonationAmount(donationAmount);
-    if (!validation.valid) {
-      setDonationError(validation.error || "Invalid amount");
-      return;
-    }
-    setDonationLoading(true);
-    try {
-      const result = await invoke<LightningInvoice>("create_lightning_invoice", {
-        amount_sats: donationAmount,
-        memo: "Support The Maid",
-      });
-      const qr_data_url = await generateInvoiceQrDataUrl(result.bolt11);
-      const expiry = result.expires_at
-        ? Math.floor(new Date(result.expires_at).getTime() / 1000)
-        : parseBolt11Expiry(result.bolt11) ?? undefined;
-      setInvoice({ ...result, qr_data_url, expiry });
-    } catch (e) {
-      setDonationError(String(e));
-    } finally {
-      setDonationLoading(false);
-    }
-  };
-
-  // Poll LNURL-verify endpoint every 5s until paid or expired.
-  useEffect(() => {
-    if (!invoice?.verify_url || paid) return;
-
-    const poll = async () => {
-      try {
-        const status = await invoke<{
-          status: string;
-          settled?: boolean;
-          preimage?: string | null;
-        }>("verify_lightning_payment_cmd", {
-          verify_url: invoice.verify_url,
-        });
-        if (isPaymentSettled(status)) {
-          setPaid(true);
-        }
-      } catch (e) {
-        // Swallow polling errors; keep trying until expiry.
-        console.error("Donation verify poll failed:", e);
-      }
-    };
-
-    const timer = setInterval(poll, DEFAULT_POLL_INTERVAL_MS);
-    // immediate first poll
-    poll();
-
-    return () => clearInterval(timer);
-  }, [invoice?.verify_url, paid]);
-
-  // Update expiry countdown every second.
-  useEffect(() => {
-    if (!invoice?.expiry || paid) {
-      setCountdown("");
-      return;
-    }
-    const update = () => {
-      if (isInvoiceExpired(invoice.expiry!)) {
-        setCountdown("Expired");
-      } else {
-        setCountdown(formatExpiryCountdown(invoice.expiry!));
-      }
-    };
-    update();
-    const timer = setInterval(update, 1000);
-    return () => clearInterval(timer);
-  }, [invoice?.expiry, paid]);
-
-  const copyInvoice = () => {
-    if (invoice?.bolt11) {
-      navigator.clipboard.writeText(invoice.bolt11);
-    }
   };
 
   const openDonate = () => {
