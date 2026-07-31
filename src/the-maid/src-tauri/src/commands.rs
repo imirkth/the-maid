@@ -5,7 +5,7 @@ use crate::settings::{BucketEntry, Settings};
 use crate::AppState;
 use serde::{Deserialize, Serialize};
 use std::path::{Path, PathBuf};
-use tauri::{Emitter, State;
+use tauri::{Emitter, State};
 
 // --- Settings commands ---
 
@@ -371,7 +371,7 @@ const MODEL_URLS: &[(&str, &str)] = &[
 fn models_dir() -> Result<PathBuf, String> {
     let home = std::env::var("HOME")
         .or_else(|_| std::env::var("USERPROFILE"))
-       map_err(|_| "Cannot determine home directory")?;
+        .map_err(|_| "Cannot determine home directory")?;
     Ok(PathBuf::from(home).join(".the-maid").join("models"))
 }
 
