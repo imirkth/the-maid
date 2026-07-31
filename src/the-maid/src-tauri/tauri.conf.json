@@ -20,8 +20,18 @@
       }
     ],
     "security": {
-      "csp": null
-    }
+      "csp": "default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data:; connect-src 'self' https://themaid.app"
+    },
+    "capabilities": [
+      {
+        "identifier": "default",
+        "description": "Default app permissions",
+        "windows": ["main"],
+        "permissions": [
+          "shell:allow-open-url"
+        ]
+      }
+    ]
   },
   "bundle": {
     "active": true,

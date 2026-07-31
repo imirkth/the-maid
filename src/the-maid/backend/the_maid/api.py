@@ -7,6 +7,7 @@ from fastapi import FastAPI, HTTPException, BackgroundTasks
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel, Field
 from typing import List, Optional
+import json
 import os
 import uuid
 
@@ -21,9 +22,32 @@ app.add_middleware(
     CORSMiddleware,
     allow_origins=["http://localhost:1420", "http://127.0.0.1:1420"],
     allow_credentials=True,
-    allow_methods=["*"],
-    allow_headers=["*"],
+    allow_methods=["GET", "POST"],
+    allow_headers=["Content-Type"],
 )
+
+# --- Settings cache ---
+
+SETTINGS_PATH = os.path.expanduser("~/.the-maid/settings.json")
+
+
+def load_sandbox_folders() -> Optional[List[str]]:
+    """Load sandbox_folders from Tauri settings file."""
+    try:
+        with open(SETTINGS_PATH, "r") as f:
+            data = json.load(f)
+            folders = data.get("sandbox_folders", [])
+            if folders:
+                return folders
+    except (OSError, json.JSONDecodeError):
+        pass
+    return None
+
+
+def _sandbox_folders() -> Optional[List[str]]:
+    # ponytail: re-read each request; settings file is small and cheap
+    return load_sandbox_folders()
+
 
 # --- Models ---
 
@@ -65,7 +89,7 @@ async def scan_directory(request: ScanRequest):
     Returns raw file list — AI categorization happens in a later stage.
     Emits progress events via stdout for Tauri event forwarding."""
     try:
-        validate_path(request.directory)
+        validate_path(request.directory, _sandbox_folders())
     except ValueError as e:
         raise HTTPException(status_code=400, detail=str(e))
     
@@ -76,12 +100,13 @@ async def scan_directory(request: ScanRequest):
 @app.post("/approve")
 async def approve_and_clean(request: ApprovalRequest):
     """Execute approved file moves."""
+    sandbox_folders = _sandbox_folders()
     results = []
     for proposal in request.proposals:
         if proposal.file_id in request.approved_ids:
             try:
-                validate_path(proposal.current_path)
-                validate_path(proposal.proposed_path)
+                validate_path(proposal.current_path, sandbox_folders)
+                validate_path(proposal.proposed_path, sandbox_folders)
                 # TODO: Execute move with trash safety
                 results.append({"file_id": proposal.file_id, "status": "moved"})
             except Exception as e:
@@ -101,7 +126,7 @@ async def get_buckets():
 @app.post("/buckets")
 async def add_bucket(bucket: Bucket):
     """Add a new approved bucket."""
-    validate_path(bucket.path)
+    validate_path(bucket.path, _sandbox_folders())
     # TODO: Save to buckets.json
     return {"id": bucket.id, "status": "created"}
 
@@ -114,14 +139,14 @@ async def get_progress():
 @app.post("/metadata")
 async def write_metadata(file_path: str, tags: List[str]):
     """Write IPTC/XMP tags to a file via ExifTool."""
-    validate_path(file_path)
+    validate_path(file_path, _sandbox_folders())
     # TODO: Integrate ExifTool
     return {"file": file_path, "tags_written": len(tags)}
 
 @app.post("/faces/cluster")
 async def cluster_faces(directory: str):
     """Cluster faces in images within a directory."""
-    validate_path(directory)
+    validate_path(directory, _sandbox_folders())
     # TODO: Implement face clustering pipeline
     return {"clusters": [], "status": "not_implemented"}
 

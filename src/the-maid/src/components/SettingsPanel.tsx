@@ -1,6 +1,6 @@
 import { useState, useEffect } from "react";
 import { invoke } from "@tauri-apps/api/core";
-import { openUrl } from "@tauri-apps/plugin-shell";
+import { open } from "@tauri-apps/plugin-shell";
 import { useDonation } from "../hooks/useDonation";
 import {
   type Settings,
@@ -89,7 +89,7 @@ export default function SettingsPanel() {
   };
 
   const openDonate = () => {
-    openUrl(DONATE_URL);
+    open(DONATE_URL);
   };
 
   if (!settings) return <p>Loading…</p>;

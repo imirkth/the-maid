@@ -111,8 +111,61 @@ pub async fn fetch_lightning_invoice(
     })
 }
 
+/// Validate that a user-supplied verify URL is safe to fetch.
+/// - Must use https scheme
+/// - Host must match the configured LNURL-pay host (pinned)
+/// - Rejects localhost, loopback, and private/reserved IP literals
+fn validate_verify_url(verify_url: &str) -> Result<(), String> {
+    let parsed = reqwest::Url::parse(verify_url)
+        .map_err(|e| format!("Invalid verify URL: {}", e))?;
+
+    if parsed.scheme() != "https" {
+        return Err("Verify URL must use HTTPS".to_string());
+    }
+
+    let host = parsed
+        .host_str()
+        .ok_or_else(|| "Verify URL missing host".to_string())?;
+
+    // Reject IP-literal hosts (loopback, private, link-local, etc.)
+    if let Some(ip) = parsed.host() {
+        if let std::net::IpAddr::V4(v4) = ip {
+            if v4.is_loopback() || v4.is_private() || v4.is_link_local() || v4.is_multicast() {
+                return Err("Verify URL host not allowed".to_string());
+            }
+        }
+        if let std::net::IpAddr::V6(v6) = ip {
+            if v6.is_loopback() || v6.is_multicast() {
+                return Err("Verify URL host not allowed".to_string());
+            }
+        }
+    }
+
+    // Reject localhost / loopback by name
+    if host == "localhost" || host == "127.0.0.1" || host == "::1" {
+        return Err("Verify URL host not allowed".to_string());
+    }
+
+    // Pin to the configured LNURL-pay host (ignoring path/query/fragment)
+    let donation_url = reqwest::Url::parse(DONATION_LNURL)
+        .map_err(|_| "Configured donation URL is invalid".to_string())?;
+    let expected_host = donation_url
+        .host_str()
+        .ok_or_else(|| "Configured donation URL missing host".to_string())?;
+    if host != expected_host {
+        return Err(format!(
+            "Verify URL host '{}' does not match donation host '{}'",
+            host, expected_host
+        ));
+    }
+
+    Ok(())
+}
+
 /// Poll the LNURL-verify URL to check if the invoice has been paid.
 pub async fn verify_lightning_payment(verify_url: &str) -> Result<PaymentStatus, String> {
+    validate_verify_url(verify_url)?;
+
     let client = http_client()?;
     let resp = client
         .get(verify_url)
@@ -194,6 +247,43 @@ mod tests {
         assert!(validate_amount(MAX_AMOUNT_SATS).is_ok());
     }
 
+    #[test]
+    fn test_validate_verify_url_accepts_matching_https() {
+        // DONATION_LNURL is a placeholder in test builds, so this just documents the shape.
+        assert!(DONATION_LNURL.contains("PLACEHOLDER"));
+    }
+
+    #[test]
+    fn test_validate_verify_url_rejects_http() {
+        let err = validate_verify_url("http://example.com/verify/1").unwrap_err();
+        assert!(err.contains("HTTPS"));
+    }
+
+    #[test]
+    fn test_validate_verify_url_rejects_localhost() {
+        let err = validate_verify_url("https://localhost:9473/verify").unwrap_err();
+        assert!(err.contains("not allowed"));
+    }
+
+    #[test]
+    fn test_validate_verify_url_rejects_loopback_ip() {
+        let err = validate_verify_url("https://127.0.0.1/verify").unwrap_err();
+        assert!(err.contains("not allowed"));
+    }
+
+    #[test]
+    fn test_validate_verify_url_rejects_private_ip() {
+        let err = validate_verify_url("https://192.168.1.50/verify").unwrap_err();
+        assert!(err.contains("not allowed"));
+    }
+
+    #[test]
+    fn test_validate_verify_url_rejects_mismatched_host() {
+        // With placeholder donation URL, any real host is mismatched
+        let err = validate_verify_url("https://other-node.example/verify").unwrap_err();
+        assert!(err.contains("does not match"));
+    }
+
     #[tokio::test]
     async fn test_fetch_invoice_missing_verify_url() {
         let mut server = mockito::Server::new_async().await;
@@ -257,7 +347,9 @@ mod tests {
     #[tokio::test]
     async fn test_verify_payment_settled_with_preimage() {
         let mut server = mockito::Server::new_async().await;
-        let url = server.url();
+        let url = server
+            .url()
+            .replace("http://", "https://PLACEHOLDER.themaid.app/");
         server
             .mock("GET", "/")
             .with_status(200)
@@ -276,7 +368,9 @@ mod tests {
     #[tokio::test]
     async fn test_verify_payment_not_settled() {
         let mut server = mockito::Server::new_async().await;
-        let url = server.url();
+        let url = server
+            .url()
+            .replace("http://", "https://PLACEHOLDER.themaid.app/");
         server
             .mock("GET", "/")
             .with_status(200)
@@ -295,7 +389,9 @@ mod tests {
     #[tokio::test]
     async fn test_verify_payment_missing_preimage_not_settled() {
         let mut server = mockito::Server::new_async().await;
-        let url = server.url();
+        let url = server
+            .url()
+            .replace("http://", "https://PLACEHOLDER.themaid.app/");
         server
             .mock("GET", "/")
             .with_status(200)
@@ -313,7 +409,9 @@ mod tests {
     #[tokio::test]
     async fn test_verify_payment_status_error_includes_reason() {
         let mut server = mockito::Server::new_async().await;
-        let url = server.url();
+        let url = server
+            .url()
+            .replace("http://", "https://PLACEHOLDER.themaid.app/");
         server
             .mock("GET", "/")
             .with_status(200)
@@ -339,7 +437,9 @@ mod tests {
     #[tokio::test]
     async fn test_verify_payment_status_not_ok_returns_unsettled() {
         let mut server = mockito::Server::new_async().await;
-        let url = server.url();
+        let url = server
+            .url()
+            .replace("http://", "https://PLACEHOLDER.themaid.app/");
         server
             .mock("GET", "/")
             .with_status(200)

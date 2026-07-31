@@ -25,17 +25,33 @@ fn resolve_backend_path(app: &tauri::AppHandle) -> PathBuf {
         app.path()
             .resolve("backend/the_maid_backend.exe", tauri::BaseDirectory::Resource)
             .unwrap_or_else(|_| {
-                let workspace = std::env::var("MAID_WORKSPACE")
-                    .unwrap_or_else(|_| String::from("."));
-                PathBuf::from(workspace).join("src/the-maid/backend/run.py")
+                #[cfg(debug_assertions)]
+                {
+                    let workspace = std::env::var("MAID_WORKSPACE")
+                        .unwrap_or_else(|_| String::from("."));
+                    PathBuf::from(workspace).join("src/the-maid/backend/run.py")
+                }
+                #[cfg(not(debug_assertions))]
+                {
+                    panic!("Failed to resolve bundled backend executable")
+                }
             })
     } else {
-        let workspace = std::env::var("MAID_WORKSPACE")
-            .unwrap_or_else(|_| {
-                let home = std::env::var("HOME").unwrap_or_else(|_| String::from("."));
-                format!("{}/.openclaw/workspace-the-maid", home)
-            });
-        PathBuf::from(workspace).join("src/the-maid/backend/run.py")
+        #[cfg(debug_assertions)]
+        {
+            let workspace = std::env::var("MAID_WORKSPACE")
+                .unwrap_or_else(|_| {
+                    let home = std::env::var("HOME").unwrap_or_else(|_| String::from("."));
+                    format!("{}/.openclaw/workspace-the-maid", home)
+                });
+            PathBuf::from(workspace).join("src/the-maid/backend/run.py")
+        }
+        #[cfg(not(debug_assertions))]
+        {
+            app.path()
+                .resolve("backend/run.py", tauri::BaseDirectory::Resource)
+                .expect("Failed to resolve bundled backend run.py")
+        }
     }
 }
 

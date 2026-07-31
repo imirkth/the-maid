@@ -18,5 +18,9 @@ Thumbs.db
 .vscode/
 .idea/
 
+# Secrets
+.env
+.env.*
+
 # OpenClaw
 .scratch/

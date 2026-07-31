@@ -35,7 +35,7 @@ def _write_xmp_tag(file_path: str, tag_name: str, tag_value: str) -> bool:
     try:
         result = subprocess.run(
             ["exiftool", "-overwrite_original",
-             f"-XMP:{tag_name}={tag_value}", file_path],
+             f"-XMP:{tag_name}={tag_value}", "--", file_path],
             capture_output=True, text=True, timeout=30
         )
         if result.returncode != 0:
@@ -57,7 +57,7 @@ def _clear_xmp_tag(file_path: str, tag_name: str = "PersonInImage") -> bool:
     try:
         result = subprocess.run(
             ["exiftool", "-overwrite_original",
-             f"-XMP:{tag_name}=", file_path],
+             f"-XMP:{tag_name}=", "--", file_path],
             capture_output=True, text=True, timeout=30
         )
         return result.returncode == 0

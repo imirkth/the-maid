@@ -87,6 +87,13 @@ impl Settings {
         fs::write(&tmp, data).map_err(|e| format!("Failed to write settings temp: {}", e))?;
         fs::rename(&tmp, &path)
             .map_err(|e| format!("Failed to commit settings: {}", e))?;
+        // ponytail: restrict settings file to owner on Unix
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let perms = std::fs::Permissions::from_mode(0o600);
+            let _ = fs::set_permissions(&path, perms);
+        }
         Ok(())
     }
 

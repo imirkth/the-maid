@@ -1,5 +1,6 @@
 import { useState, useEffect, useCallback } from "react";
 import { invoke } from "@tauri-apps/api/core";
+import { convertFileSrc } from "@tauri-apps/api/core";
 import type { FaceClusterInfo, RenameResult } from "../types/face-cluster";
 
 export default function FaceClusterView() {
@@ -92,7 +93,7 @@ export default function FaceClusterView() {
                          display: "flex", alignItems: "center", justifyContent: "center",
                          marginBottom: "8px", borderRadius: "4px", overflow: "hidden" }}>
               {cluster.representative_path
-                ? <img src={`file://${cluster.representative_path}`} alt="Face"
+                ? <img src={convertFileSrc(cluster.representative_path)} alt="Face"
                        style={{ width: "100%", height: "100%", objectFit: "cover" }}
                        onError={(e) => { (e.target as HTMLImageElement).style.display = "none"; }} />
                 : <span>No preview</span>}

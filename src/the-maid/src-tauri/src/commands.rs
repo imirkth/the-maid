@@ -149,12 +149,17 @@ fn validate_path(path: &str, sandbox_folders: &[String]) -> Result<String, Strin
     if sandbox_folders.is_empty() {
         return Ok(expanded);
     }
+
+    // ponytail: resolve symlinks before containment check, matching Python sandbox.py
+    let canonical = std::fs::canonicalize(Path::new(&expanded))
+        .map_err(|e| format!("Failed to resolve path '{}': {}", path, e))?;
+    let canonical_str = canonical.to_string_lossy().replace('\\', "/");
+
     let allowed_paths = sandbox_folder_paths(sandbox_folders);
-    let normalized_path = expanded.replace('\\', "/");
     for allowed in &allowed_paths {
         let normalized_allowed = allowed.replace('\\', "/");
-        if normalized_path == normalized_allowed
-            || normalized_path.starts_with(&format!("{}/", normalized_allowed))
+        if canonical_str == normalized_allowed
+            || canonical_str.starts_with(&format!("{}/", normalized_allowed))
         {
             return Ok(expanded);
         }
@@ -901,15 +906,57 @@ mod tests {
     }
 
     #[test]
-    fn test_can_scan_with_folders() {
-        // This test depends on settings file state, just test the logic
-        let folders = vec!["Desktop".to_string()];
-        assert!(!folders.is_empty());
+    fn test_validate_path_rejects_symlink_escape() {
+        let tmp = std::env::temp_dir().join(format!(
+            "the-maid-symlink-test-{}",
+            std::process::id()
+        ));
+        std::fs::remove_dir_all(&tmp).ok();
+        std::fs::create_dir_all(&tmp).unwrap();
+
+        let sandbox = tmp.join("Desktop");
+        std::fs::create_dir_all(&sandbox).unwrap();
+        let secret = tmp.join("secret.txt");
+        std::fs::write(&secret, "secret").unwrap();
+        let link = sandbox.join("evil_link");
+        #[cfg(unix)]
+        std::os::unix::fs::symlink(&secret, &link).unwrap();
+        #[cfg(windows)]
+        std::os::windows::fs::symlink_file(&secret, &link).unwrap();
+
+        let folders = vec![sandbox.to_string_lossy().to_string()];
+        let result = validate_path(
+            &link.to_string_lossy().to_string(),
+            &folders,
+        );
+        assert!(result.is_err(), "symlink escape should be rejected");
+        std::fs::remove_dir_all(&tmp).ok();
     }
 
     #[test]
-    fn test_can_scan_without_folders() {
-        let folders: Vec<String> = vec![];
-        assert!(folders.is_empty());
+    fn test_validate_path_allows_symlink_within_sandbox() {
+        let tmp = std::env::temp_dir().join(format!(
+            "the-maid-symlink-in-test-{}",
+            std::process::id()
+        ));
+        std::fs::remove_dir_all(&tmp).ok();
+        std::fs::create_dir_all(&tmp).unwrap();
+
+        let sandbox = tmp.join("Desktop");
+        std::fs::create_dir_all(&sandbox).unwrap();
+        let real = sandbox.join("real.txt");
+        std::fs::write(&real, "ok").unwrap();
+        let link = sandbox.join("good_link");
+        #[cfg(unix)]
+        std::os::unix::fs::symlink(&real, &link).unwrap();
+        #[cfg(windows)]
+        std::os::windows::fs::symlink_file(&real, &link).unwrap();
+
+        let folders = vec![sandbox.to_string_lossy().to_string()];
+        let result = validate_path(
+            &link.to_string_lossy().to_string(),
+            &folders,
+        );
+        assert!(result.is_ok(), "symlink within sandbox should be allowed");
+        std::fs::remove_dir_all(&tmp).ok();
     }
-}

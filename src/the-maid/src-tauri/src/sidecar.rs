@@ -172,17 +172,7 @@ impl SidecarManager {
     pub fn kill(&self) -> Result<(), String> {
         let mut child_guard = self.child.lock().unwrap();
         if let Some(mut child) = child_guard.take() {
-            #[cfg(unix)]
-            {
-                let pid = child.id() as i32;
-                unsafe { libc::kill(pid, libc::SIGTERM); }
-            }
-            #[cfg(windows)]
-            {
-                let _ = Command::new("taskkill")
-                    .args(["/PID", &child.id().to_string(), "/T", "/F"])
-                    .output();
-            }
+            let _ = child.kill();
             match child.wait() {
                 Ok(_) => log::info!("[The Maid] Python backend terminated cleanly"),
                 Err(e) => log::warn!("[The Maid] Error waiting for Python exit: {}", e),
