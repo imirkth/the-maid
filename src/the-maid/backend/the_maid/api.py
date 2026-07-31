@@ -59,18 +59,19 @@ class TagFaceRequest(BaseModel):
 async def health():
     return {"status": "ok", "version": "0.1.0"}
 
-@app.post("/scan", response_model=List[FileProposal])
+@app.post("/scan")
 async def scan_directory(request: ScanRequest):
-    """Scan a directory and return file organization proposals."""
+    """Scan a directory and return file metadata.
+    Returns raw file list — AI categorization happens in a later stage.
+    Emits progress events via stdout for Tauri event forwarding."""
     try:
         validate_path(request.directory)
     except ValueError as e:
         raise HTTPException(status_code=400, detail=str(e))
     
     scanner = FileScanner(max_files=request.max_files)
-    # TODO: Implement actual scanning logic
-    # For now, return empty list
-    return []
+    files = scanner.scan_directory(request.directory)
+    return {"files": files, "errors": scanner.errors, "count": scanner.scanned_count}
 
 @app.post("/approve")
 async def approve_and_clean(request: ApprovalRequest):

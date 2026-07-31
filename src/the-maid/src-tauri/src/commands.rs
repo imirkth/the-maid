@@ -207,14 +207,49 @@ pub struct Bucket {
     pub path: String,
 }
 
+// ponytail: scan returns raw file metadata from Python backend. AI routing is a later stage.
+#[derive(Serialize, Deserialize, Debug)]
+pub struct ScanResponse {
+    pub files: Vec<serde_json::Value>,
+    pub errors: Vec<String>,
+    pub count: usize,
+}
+
 #[tauri::command]
-pub async fn scan_directory(request: ScanRequest) -> Result<Vec<FileProposal>, String> {
+pub async fn scan_directory(request: ScanRequest) -> Result<ScanResponse, String> {
     let settings = Settings::load()?;
     validate_path(&request.directory, &settings.sandbox_folders)?;
 
-    // TODO: Call Python backend via sidecar to execute scan
-    // For now, return empty — Python side handles the actual scan
-    Err("Python backend scan not yet wired. Use /scan endpoint directly.".to_string())
+    // Call Python backend HTTP API
+    let client = reqwest::Client::builder()
+        .timeout(std::time::Duration::from_secs(60))
+        .build()
+        .map_err(|e| format!("HTTP client error: {}", e))?;
+
+    let body = serde_json::json!({
+        "directory": request.directory,
+        "max_files": request.max_files.unwrap_or(10000),
+    });
+
+    let resp = client
+        .post("http://127.0.0.1:9473/scan")
+        .json(&body)
+        .send()
+        .await
+        .map_err(|e| format!("Failed to reach Python backend: {}", e))?;
+
+    if !resp.status().is_success() {
+        let status = resp.status();
+        let text = resp.text().await.unwrap_or_default();
+        return Err(format!("Python backend error ({}): {}", status, text));
+    }
+
+    let scan_resp: ScanResponse = resp
+        .json()
+        .await
+        .map_err(|e| format!("Failed to parse scan response: {}", e))?;
+
+    Ok(scan_resp)
 }
 
 #[tauri::command]

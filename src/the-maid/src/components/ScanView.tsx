@@ -2,14 +2,20 @@ import { useState, useEffect } from "react";
 import { invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
 
-interface ScanResult {
+interface FileMeta {
   file_id: string;
-  original_filename: string;
-  current_path: string;
-  proposed_path: string;
-  proposed_tags: string[];
-  faces_detected: string[];
-  rationale: string;
+  filename: string;
+  path: string;
+  size_bytes: number;
+  modified_time: string;
+  extension: string;
+  mime_type: string;
+}
+
+interface ScanResponse {
+  files: FileMeta[];
+  errors: string[];
+  count: number;
 }
 
 interface Settings {
@@ -23,9 +29,10 @@ export default function ScanView() {
   const [directory, setDirectory] = useState("");
   const [scanning, setScanning] = useState(false);
   const [progress, setProgress] = useState(0);
-  const [results, setResults] = useState<ScanResult[]>([]);
+  const [results, setResults] = useState<FileMeta[]>([]);
   const [error, setError] = useState("");
   const [backendReady, setBackendReady] = useState(false);
+  const [scanned, setScanned] = useState(false);
   const [canScan, setCanScan] = useState(false);
   const [settings, setSettings] = useState<Settings | null>(null);
 
@@ -67,12 +74,17 @@ export default function ScanView() {
     setProgress(0);
     setError("");
     setResults([]);
+    setScanned(false);
 
     try {
-      const proposals: ScanResult[] = await invoke("scan_directory", {
+      const resp: ScanResponse = await invoke("scan_directory", {
         request: { directory, max_files: 10000 },
       });
-      setResults(proposals);
+      setResults(resp.files);
+      setScanned(true);
+      if (resp.errors.length > 0) {
+        setError(resp.errors.join("; "));
+      }
     } catch (err) {
       setError(String(err));
     } finally {
@@ -135,7 +147,7 @@ export default function ScanView() {
         </div>
       )}
 
-      {results.length === 0 && !scanning && !error && directory && backendReady && canScan && (
+      {results.length === 0 && scanned && !scanning && !error && (
         <p style={{ color: "#888", marginTop: "16px" }}>I found nothing to organize.</p>
       )}
     </div>
