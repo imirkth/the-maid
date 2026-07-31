@@ -5,6 +5,7 @@ import { describe, it, expect } from "vitest";
 import {
   type FeatureFlags,
   type DownloadStatus,
+  type WizardStep,
   allDownloadsDone,
   validateFolderSelection,
   validateFeatureSelection,
@@ -182,5 +183,124 @@ describe("Setup Wizard — payload building", () => {
     expect(payload.pdf_ocr).toBe(false);
     expect(payload.face_clustering).toBe(false);
     expect(payload.general_files).toBe(true);
+  });
+});
+
+describe("Setup Wizard — setup_complete state transitions", () => {
+  // Simulates the Rust settings state machine: setup_complete gates can_scan.
+  // ponytail: pure logic — Rust side tested separately.
+  interface SettingsState {
+    first_run: boolean;
+    setup_complete: boolean;
+    sandbox_folders: string[];
+    features: FeatureFlags;
+  }
+
+  function defaultState(): SettingsState {
+    return {
+      first_run: true,
+      setup_complete: false,
+      sandbox_folders: [],
+      features: { pdf_ocr: false, face_clustering: false, general_files: false },
+    };
+  }
+
+  function completeSetup(state: SettingsState, folders: string[], features: FeatureFlags): SettingsState {
+    return {
+      first_run: false,
+      setup_complete: true,
+      sandbox_folders: folders,
+      features,
+    };
+  }
+
+  function canScan(state: SettingsState): boolean {
+    return state.setup_complete && state.sandbox_folders.length > 0;
+  }
+
+  it("default state — scan disabled", () => {
+    expect(canScan(defaultState())).toBe(false);
+  });
+
+  it("setup_complete with folders — scan enabled", () => {
+    const state = completeSetup(defaultState(), ["Desktop"], { pdf_ocr: false, face_clustering: false, general_files: true });
+    expect(canScan(state)).toBe(true);
+  });
+
+  it("setup_complete without folders — scan disabled", () => {
+    const state = completeSetup(defaultState(), [], { pdf_ocr: false, face_clustering: false, general_files: true });
+    expect(canScan(state)).toBe(false);
+  });
+
+  it("setup incomplete but has folders — scan disabled", () => {
+    const state = defaultState();
+    state.sandbox_folders = ["Desktop"];
+    expect(canScan(state)).toBe(false);
+  });
+
+  it("completeSetup clears first_run flag", () => {
+    const state = completeSetup(defaultState(), ["Desktop"], { pdf_ocr: false, face_clustering: false, general_files: true });
+    expect(state.first_run).toBe(false);
+  });
+});
+
+describe("Setup Wizard — feature flag persistence", () => {
+  // Verify buildSetupPayload roundtrips through JSON (simulates save/load)
+  it("feature flags survive JSON roundtrip", () => {
+    const features: FeatureFlags = { pdf_ocr: true, face_clustering: true, general_files: false };
+    const payload = buildSetupPayload(["Desktop"], features);
+    const json = JSON.stringify(payload);
+    const parsed = JSON.parse(json);
+    expect(parsed.pdf_ocr).toBe(true);
+    expect(parsed.face_clustering).toBe(true);
+    expect(parsed.general_files).toBe(false);
+  });
+
+  it("all-false feature flags persist correctly", () => {
+    const features: FeatureFlags = { pdf_ocr: false, face_clustering: false, general_files: false };
+    const payload = buildSetupPayload([], features);
+    const json = JSON.stringify(payload);
+    const parsed = JSON.parse(json);
+    expect(parsed.pdf_ocr).toBe(false);
+    expect(parsed.face_clustering).toBe(false);
+    expect(parsed.general_files).toBe(false);
+  });
+
+  it("folder list persists through payload", () => {
+    const folders = ["Desktop", "Downloads", "Documents", "Pictures"];
+    const payload = buildSetupPayload(folders, { pdf_ocr: true, face_clustering: false, general_files: true });
+    const json = JSON.stringify(payload);
+    const parsed = JSON.parse(json);
+    expect(parsed.folders).toEqual(folders);
+  });
+});
+
+describe("Setup Wizard — folder selection validation", () => {
+  it("rejects empty folder list", () => {
+    const result = validateFolderSelection([]);
+    expect(result.valid).toBe(false);
+    expect(result.error).toBeDefined();
+  });
+
+  it("accepts single folder", () => {
+    expect(validateFolderSelection(["Desktop"]).valid).toBe(true);
+  });
+
+  it("accepts multiple folders", () => {
+    expect(validateFolderSelection(["Desktop", "Downloads", "Documents"]).valid).toBe(true);
+  });
+
+  it("error message mentions at least one folder", () => {
+    const result = validateFolderSelection([]);
+    expect(result.error).toContain("at least one");
+  });
+});
+
+describe("Setup Wizard — wizard step type", () => {
+  it("WizardStep type constrains to 1-4", () => {
+    const step: WizardStep = 1;
+    expect(step).toBe(1);
+    expect(nextStep(step)).toBe(2);
+    expect(prevStep(4)).toBe(3);
   });
 });

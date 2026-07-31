@@ -38,7 +38,10 @@
         "installMode": "currentUser",
         "languages": ["English"],
         "displayLanguageSelector": false,
-        "sidebarHtml": null
+        "installerHooks": "./windows/installer-hooks.nsi",
+        "headerImage": null,
+        "sidebarImage": null,
+        "license": null
       }
     }
   }

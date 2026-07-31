@@ -122,6 +122,7 @@ fn main() {
             commands::check_updates,
             commands::get_app_version,
             commands::get_model_status,
+            commands::download_model,
         ])
         .run(tauri::generate_context!())
         .expect("error while running The Maid application");

@@ -4,8 +4,8 @@
 use crate::settings::{BucketEntry, Settings};
 use crate::AppState;
 use serde::{Deserialize, Serialize};
-use std::path::Path;
-use tauri::State;
+use std::path::{Path, PathBuf};
+use tauri::{Emitter, State;
 
 // --- Settings commands ---
 
@@ -347,6 +347,146 @@ pub async fn cluster_faces(directory: String) -> Result<Vec<String>, String> {
     let settings = Settings::load()?;
     validate_path(&directory, &settings.sandbox_folders)?;
     Ok(vec![])
+}
+
+// --- Model download with resume ---
+
+#[derive(Serialize, Deserialize, Debug, Clone)]
+pub struct DownloadProgress {
+    pub model_id: String,
+    pub downloaded_bytes: u64,
+    pub total_bytes: u64,
+    pub percent: f64,
+    pub complete: bool,
+    pub error: Option<String>,
+}
+
+const MODEL_URLS: &[(&str, &str)] = &[
+    // ponytail: placeholder URLs — real model hosting added when bundling pipeline exists.
+    // Format: (model_id, download_url)
+    ("pdf", "https://models.themaid.app/pdf-ocr-v1.gguf"),
+    ("face", "https://models.themaid.app/face-v1.gguf"),
+];
+
+fn models_dir() -> Result<PathBuf, String> {
+    let home = std::env::var("HOME")
+        .or_else(|_| std::env::var("USERPROFILE"))
+       map_err(|_| "Cannot determine home directory")?;
+    Ok(PathBuf::from(home).join(".the-maid").join("models"))
+}
+
+#[tauri::command]
+pub async fn download_model(
+    model_id: String,
+    app_handle: tauri::AppHandle,
+) -> Result<(), String> {
+    let url = MODEL_URLS
+        .iter()
+        .find(|(id, _)| *id == model_id)
+        .map(|(_, url)| *url)
+        .ok_or_else(|| format!("Unknown model: {}", model_id))?;
+
+    let dir = models_dir()?;
+    std::fs::create_dir_all(&dir)
+        .map_err(|e| format!("Failed to create models dir: {}", e))?;
+
+    let dest = dir.join(format!("{}.gguf", model_id));
+    let tmp = dir.join(format!("{}.gguf.part", model_id));
+
+    // Resume: check .part file for existing bytes
+    let resume_from = if tmp.exists() {
+        std::fs::metadata(&tmp).map(|m| m.len()).unwrap_or(0)
+    } else {
+    0
+    };
+
+    let client = reqwest::Client::builder()
+        .timeout(std::time::Duration::from_secs(300))
+        .build()
+        .map_err(|e| format!("HTTP client error: {}", e))?;
+
+    let mut req = client.get(url);
+    if resume_from > 0 {
+        req = req.header("Range", format!("bytes={}-", resume_from));
+    }
+
+    let resp = req
+        .send()
+               .await
+        .map_err(|e| format!("Download failed: {}", e))?;
+
+    if !resp.status().is_success() && resp.status().as_u16() != 206 {
+        // 206 = Partial Content (resume supported). If server doesn't support resume,
+        // restart from scratch.
+        if resume_from > 0 {
+            std::fs::remove_file(&tmp).ok();
+            return download_model(model_id, app_handle).await;
+        }
+        return Err(format!("Server error: {}", resp.status()));
+    }
+
+    let total = resp
+        .content_length()
+        .map(|c| c + resume_from)
+        .unwrap_or(0);
+
+    let use_temp = resume_from == 0;
+    let file_path = if use_temp { &tmp } else { &tmp };
+    let mut file = if resume_from > 0 {
+        std::fs::OpenOptions::new()
+            .append(true)
+            .open(file_path)
+            .map_err(|e| format!("Failed to open temp file: {}", e))?
+    } else {
+        std::fs::File::create(file_path)
+            .map_err(|e| format!("Failed to create temp file: {}", e))?
+    };
+
+    use std::io::Write;
+    let mut downloaded = resume_from;
+    let mut buf = [0u8; 8192];
+    let mut stream = resp.bytes_stream();
+    use futures_util::StreamExt;
+    while let Some(chunk) = stream.next().await {
+        let chunk = chunk.map_err(|e| format!("Stream error: {}", e))?;
+        file.write_all(&chunk)
+            .map_err(|e| format!("Write error: {}", e))?;
+        downloaded += chunk.len() as u64;
+        let percent = if total > 0 {
+            (downloaded as f64 / total as f64) * 100.0
+        } else {
+            0.0
+        };
+        let _ = app_handle.emit(
+            "model_download_progress",
+            DownloadProgress {
+                model_id: model_id.clone(),
+                downloaded_bytes: downloaded,
+                total_bytes: total,
+                percent,
+                complete: false,
+                error: None,
+            },
+        );
+    }
+
+    drop(file);
+    std::fs::rename(&tmp, &dest)
+        .map_err(|e| format!("Failed to finalize model file: {}", e))?;
+
+    let _ = app_handle.emit(
+        "model_download_progress",
+        DownloadProgress {
+            model_id: model_id.clone(),
+            downloaded_bytes: downloaded,
+            total_bytes: total,
+            percent: 100.0,
+            complete: true,
+            error: None,
+        },
+    );
+
+    Ok(())
 }
 
 // --- Update check ---

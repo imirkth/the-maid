@@ -1,5 +1,6 @@
-import { useState, useEffect, useRef } from "react";
+import { useState, useEffect } from "react";
 import { invoke } from "@tauri-apps/api/core";
+import { listen } from "@tauri-apps/api/event";
 import {
   type FeatureFlags,
   type DownloadStatus,
@@ -12,7 +13,7 @@ interface Props {
   onComplete: () => void;
 }
 
-// ponytail: model metadata — sizes for progress display. Real URLs added when bundling pipeline exists.
+// ponytail: model metadata — sizes for progress display. Real URLs handled by Rust download_model command.
 const MODELS = {
   text: { name: "Text LLM (always bundled)", size: 500, required: true },
   pdf: { name: "PDF OCR Model", size: 1000, optional: true },
@@ -20,6 +21,15 @@ const MODELS = {
 };
 
 type DownloadState = DownloadStatus["state"];
+
+interface ModelDownloadProgress {
+  model_id: string;
+  downloaded_bytes: number;
+  total_bytes: number;
+  percent: number;
+  complete: boolean;
+  error: string | null;
+}
 
 export default function SetupWizard({ onComplete }: Props) {
   const [step, setStep] = useState(1);
@@ -41,15 +51,22 @@ export default function SetupWizard({ onComplete }: Props) {
   });
   const [saving, setSaving] = useState(false);
   const [error, setError] = useState("");
-  const intervalsRef = useRef<Map<string, ReturnType<typeof setInterval>>(new Map());
 
-  // Cleanup any running download intervals when the wizard unmounts.
+  // Listen for real download progress events from Rust backend
   useEffect(() => {
-    const intervals = intervalsRef.current;
-    return () => {
-      intervals.forEach((interval) => clearInterval(interval));
-      intervals.clear();
-    };
+    const unlisten = listen<ModelDownloadProgress>("model_download_progress", (e) => {
+      const p = e.payload;
+      setDownloads((prev) => {
+        if (p.error) {
+          return { ...prev, [p.model_id]: { state: "idle", progress: 0 } };
+        }
+        if (p.complete) {
+          return { ...prev, [p.model_id]: { state: "done", progress: 100 } };
+        }
+        return { ...prev, [p.model_id]: { state: "downloading", progress: p.percent } };
+      });
+    });
+    return () => { unlisten.then((f) => f()); };
   }, []);
 
   const toggleFolder = (folder: string) => {
@@ -137,39 +154,17 @@ export default function SetupWizard({ onComplete }: Props) {
   );
 
   // Step 3: Model download with progress
-  const startDownload = (key: string) => {
-    // ponytail: simulated download. Real download logic added when model bundling pipeline exists.
-    // Clear any previous interval for this model before starting a new one.
-    const previous = intervalsRef.current.get(key);
-    if (previous) clearInterval(previous);
-
+  const startDownload = async (key: string) => {
     setDownloads((prev) => ({ ...prev, [key]: { state: "downloading", progress: 0 } }));
-    const interval = setInterval(() => {
-      setDownloads((prev) => {
-        const current = prev[key];
-        if (current.state !== "downloading") {
-          clearInterval(interval);
-          intervalsRef.current.delete(key);
-          return prev;
-        }
-        const next = Math.min(current.progress + Math.random() * 15 + 5, 100);
-        if (next >= 100) {
-          clearInterval(interval);
-          intervalsRef.current.delete(key);
-          return { ...prev, [key]: { state: "done", progress: 100 } };
-        }
-        return { ...prev, [key]: { state: "downloading", progress: next } };
-      });
-    }, 200);
-    intervalsRef.current.set(key, interval);
+    try {
+      await invoke("download_model", { modelId: key });
+    } catch (err) {
+      setDownloads((prev) => ({ ...prev, [key]: { state: "idle", progress: 0 } }));
+      setError(`Download failed: ${err}`);
+    }
   };
 
   const skipDownload = (key: string) => {
-    const interval = intervalsRef.current.get(key);
-    if (interval) {
-      clearInterval(interval);
-      intervalsRef.current.delete(key);
-    }
     setDownloads((prev) => ({ ...prev, [key]: { state: "skipped", progress: 0 } }));
   };
 
