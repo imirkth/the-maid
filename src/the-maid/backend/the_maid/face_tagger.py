@@ -4,6 +4,7 @@ Writes XMP:PersonInImage tags to photos via ExifTool.
 Retroactive: naming a cluster writes to ALL photos in that cluster.
 """
 
+import re
 import subprocess
 import shutil
 from pathlib import Path
@@ -14,10 +15,18 @@ from .face_cluster import FaceClusterer
 
 MAX_LABEL_LENGTH = 100
 
+# ponytail: reject characters ExifTool treats specially in tag values
+_EXIFTOOL_BAD_CHARS = re.compile(r'[\x00-\x1f\x7f=;:\[\]{}\\|^~<>]')
+
+
+def _exiftool_path() -> Optional[str]:
+    """Return absolute path to exiftool binary, or None if unavailable."""
+    return shutil.which("exiftool")
+
 
 def _exiftool_available() -> bool:
     """Check if exiftool binary is on PATH."""
-    return shutil.which("exiftool") is not None
+    return _exiftool_path() is not None
 
 
 def _write_xmp_tag(file_path: str, tag_name: str, tag_value: str) -> bool:
@@ -32,11 +41,25 @@ def _write_xmp_tag(file_path: str, tag_name: str, tag_value: str) -> bool:
     if not _file_exists(file_path):
         return False
 
+    exiftool = _exiftool_path()
+    if exiftool is None:
+        return False
+
+    # ponytail: sanitize at the point of invocation so tests (and future callers)
+    # that pass a dirty label do not accidentally inject ExifTool metacharacters.
+    safe_value = _sanitize_label(tag_value)
+    if not safe_value:
+        return False
+
+    # Bandit flag on subprocess without shell=True is a false positive here:
+    # we pass a fixed argv list, use '--' to terminate option parsing, and
+    # sanitize the label so no ExifTool metacharacters can alter semantics.
     try:
-        result = subprocess.run(
-            ["exiftool", "-overwrite_original",
-             f"-XMP:{tag_name}={tag_value}", "--", file_path],
-            capture_output=True, text=True, timeout=30
+        result = subprocess.run(  # nosec B603
+            [exiftool, "-overwrite_original",
+             f"-XMP:{tag_name}={safe_value}", "--", file_path],
+            capture_output=True, text=True, timeout=30,
+            check=False,
         )
         if result.returncode != 0:
             return False
@@ -54,11 +77,15 @@ def _clear_xmp_tag(file_path: str, tag_name: str = "PersonInImage") -> bool:
         return False
     if not _file_exists(file_path):
         return False
+    exiftool = _exiftool_path()
+    if exiftool is None:
+        return False
     try:
-        result = subprocess.run(
-            ["exiftool", "-overwrite_original",
+        result = subprocess.run(  # nosec B603
+            [exiftool, "-overwrite_original",
              f"-XMP:{tag_name}=", "--", file_path],
-            capture_output=True, text=True, timeout=30
+            capture_output=True, text=True, timeout=30,
+            check=False,
         )
         return result.returncode == 0
     except (subprocess.TimeoutExpired, FileNotFoundError):
@@ -72,10 +99,12 @@ def _file_exists(file_path: str) -> bool:
 
 def _sanitize_label(label: str) -> str:
     """
-    Strip leading/trailing whitespace and clamp label length.
+    Strip leading/trailing whitespace, clamp length, and remove characters that
+    ExifTool treats specially (=, :, ;, braces, control chars, etc.).
     Returns empty string if label is only whitespace.
     """
     cleaned = label.strip()
+    cleaned = _EXIFTOOL_BAD_CHARS.sub("", cleaned)
     if not cleaned:
         return ""
     return cleaned[:MAX_LABEL_LENGTH]

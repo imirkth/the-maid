@@ -169,9 +169,22 @@ class TestEmbeddingStorage:
         clusterer.store_embedding("f1", "/a.jpg", 0, emb)
         with sqlite3.connect(temp_db) as conn:
             blob = conn.execute("SELECT embedding FROM embeddings").fetchone()[0]
-        arr = np.frombuffer(blob, dtype=np.float32)
-        assert len(arr) == 128
-        np.testing.assert_allclose(arr, np.array(emb, dtype=np.float32), rtol=1e-5)
+        if clusterer._cipher is not None and clusterer._cipher._fernet is not None:
+            # Encrypted blob is not the raw float32 bytes.
+            original_bytes = np.array(emb, dtype=np.float32).tobytes()
+            assert blob != original_bytes
+            assert len(blob) != len(original_bytes)
+            # Decrypt path round-trips.
+            decrypted = clusterer._cipher.decrypt(blob)
+            np.testing.assert_allclose(
+                np.frombuffer(decrypted, dtype=np.float32),
+                np.array(emb, dtype=np.float32),
+                rtol=1e-5,
+            )
+        else:
+            arr = np.frombuffer(blob, dtype=np.float32)
+            assert len(arr) == 128
+            np.testing.assert_allclose(arr, np.array(emb, dtype=np.float32), rtol=1e-5)
 
     def test_store_invalid_embedding_dimension(self, clusterer):
         """Embedding with wrong dimension should be rejected."""

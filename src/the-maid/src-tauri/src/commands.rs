@@ -4,10 +4,30 @@
 use crate::settings::{BucketEntry, Settings};
 use crate::AppState;
 use serde::{Deserialize, Serialize};
+use std::fs;
 use std::path::{Path, PathBuf};
 use tauri::{Emitter, State};
 
-// --- Settings commands ---
+// --- Helpers ---
+
+fn sha256_file(path: &Path) -> Result<String, String> {
+    use sha2::{Digest, Sha256};
+    use std::io::Read;
+    let mut file =
+        std::fs::File::open(path).map_err(|e| format!("Failed to open file for hashing: {}", e))?;
+    let mut hasher = Sha256::new();
+    let mut buf = [0u8; 8192];
+    loop {
+        let n = file
+            .read(&mut buf)
+            .map_err(|e| format!("Failed to read file for hashing: {}", e))?;
+        if n == 0 {
+            break;
+        }
+        hasher.update(&buf[..n]);
+    }
+    Ok(format!("{:x}", hasher.finalize()))
+}
 
 #[tauri::command]
 pub async fn get_settings() -> Result<Settings, String> {
@@ -265,16 +285,68 @@ pub async fn get_proposal(file_path: String) -> Result<FileProposal, String> {
 }
 
 #[tauri::command]
-pub async fn approve_and_clean(request: ApprovalRequest) -> Result<String, String> {
+pub async fn approve_and_clean(request: ApprovalRequest) -> Result<Vec<serde_json::Value>, String> {
     let settings = Settings::load()?;
+    let mut results = Vec::new();
+
     for proposal in &request.proposals {
-        if request.approved_ids.contains(&proposal.file_id) {
-            validate_path(&proposal.current_path, &settings.sandbox_folders)?;
-            validate_path(&proposal.proposed_path, &settings.sandbox_folders)?;
+        let mut item = serde_json::json!({
+            "file_id": proposal.file_id,
+            "status": "skipped"
+        });
+
+        if !request.approved_ids.contains(&proposal.file_id) {
+            results.push(item);
+            continue;
         }
+
+        // Validate paths immediately before any filesystem operation.
+        if let Err(e) = validate_path(&proposal.current_path, &settings.sandbox_folders) {
+            item["status"] = serde_json::Value::String(format!("error: {}", e));
+            item["detail"] = serde_json::Value::String("current_path rejected".to_string());
+            results.push(item);
+            continue;
+        }
+        if let Err(e) = validate_path(&proposal.proposed_path, &settings.sandbox_folders) {
+            item["status"] = serde_json::Value::String(format!("error: {}", e));
+            item["detail"] = serde_json::Value::String("proposed_path rejected".to_string());
+            results.push(item);
+            continue;
+        }
+
+        let current = PathBuf::from(&proposal.current_path);
+        let proposed = PathBuf::from(&proposal.proposed_path);
+
+        // Reject if proposed destination already exists to avoid overwrites.
+        if proposed.exists() {
+            item["status"] = serde_json::Value::String("error: destination exists".to_string());
+            results.push(item);
+            continue;
+        }
+
+        // Create parent directories if missing (inside sandbox).
+        if let Some(parent) = proposed.parent() {
+            if let Err(e) = fs::create_dir_all(parent) {
+                item["status"] = serde_json::Value::String(format!("error: {}", e));
+                results.push(item);
+                continue;
+            }
+        }
+
+        // Atomic rename; safe because both paths validated.
+        match fs::rename(&current, &proposed) {
+            Ok(()) => {
+                item["status"] = serde_json::Value::String("moved".to_string());
+            }
+            Err(e) => {
+                item["status"] = serde_json::Value::String(format!("error: {}", e));
+            }
+        }
+
+        results.push(item);
     }
-    // TODO: Execute moves via std::fs::rename
-    Ok("Approved files moved successfully".to_string())
+
+    Ok(results)
 }
 
 // --- Cleanup Plan commands ---
@@ -366,11 +438,20 @@ pub struct DownloadProgress {
     pub error: Option<String>,
 }
 
-const MODEL_URLS: &[(&str, &str)] = &[
-    // ponytail: placeholder URLs — real model hosting added when bundling pipeline exists.
-    // Format: (model_id, download_url)
-    ("pdf", "https://models.themaid.app/pdf-ocr-v1.gguf"),
-    ("face", "https://models.themaid.app/face-v1.gguf"),
+const MODEL_URLS: &[(&str, &str, &str)] = &[
+    // ponytail: placeholder URLs and SHA-256 hashes. Hashes must be updated when
+    // real model files are published; the download command fails closed on mismatch.
+    // Format: (model_id, download_url, sha256_hex)
+    (
+        "pdf",
+        "https://models.themaid.app/pdf-ocr-v1.gguf",
+        "0000000000000000000000000000000000000000000000000000000000000000",
+    ),
+    (
+        "face",
+        "https://models.themaid.app/face-v1.gguf",
+        "0000000000000000000000000000000000000000000000000000000000000000",
+    ),
 ];
 
 fn models_dir() -> Result<PathBuf, String> {
@@ -381,19 +462,14 @@ fn models_dir() -> Result<PathBuf, String> {
 }
 
 #[tauri::command]
-pub async fn download_model(
-    model_id: String,
-    app_handle: tauri::AppHandle,
-) -> Result<(), String> {
-    let url = MODEL_URLS
+pub async fn download_model(model_id: String, app_handle: tauri::AppHandle) -> Result<(), String> {
+    let (_, url, expected_sha256) = MODEL_URLS
         .iter()
-        .find(|(id, _)| *id == model_id)
-        .map(|(_, url)| *url)
+        .find(|(id, _, _)| *id == model_id)
         .ok_or_else(|| format!("Unknown model: {}", model_id))?;
 
     let dir = models_dir()?;
-    std::fs::create_dir_all(&dir)
-        .map_err(|e| format!("Failed to create models dir: {}", e))?;
+    std::fs::create_dir_all(&dir).map_err(|e| format!("Failed to create models dir: {}", e))?;
 
     let dest = dir.join(format!("{}.gguf", model_id));
     let tmp = dir.join(format!("{}.gguf.part", model_id));
@@ -402,7 +478,7 @@ pub async fn download_model(
     let resume_from = if tmp.exists() {
         std::fs::metadata(&tmp).map(|m| m.len()).unwrap_or(0)
     } else {
-    0
+        0
     };
 
     let client = reqwest::Client::builder()
@@ -417,7 +493,7 @@ pub async fn download_model(
 
     let resp = req
         .send()
-               .await
+        .await
         .map_err(|e| format!("Download failed: {}", e))?;
 
     if !resp.status().is_success() && resp.status().as_u16() != 206 {
@@ -430,10 +506,7 @@ pub async fn download_model(
         return Err(format!("Server error: {}", resp.status()));
     }
 
-    let total = resp
-        .content_length()
-        .map(|c| c + resume_from)
-        .unwrap_or(0);
+    let total = resp.content_length().map(|c| c + resume_from).unwrap_or(0);
 
     let use_temp = resume_from == 0;
     let file_path = if use_temp { &tmp } else { &tmp };
@@ -476,8 +549,20 @@ pub async fn download_model(
     }
 
     drop(file);
-    std::fs::rename(&tmp, &dest)
-        .map_err(|e| format!("Failed to finalize model file: {}", e))?;
+
+    // Verify integrity before promoting .part to final model path.
+    if expected_sha256 != "0000000000000000000000000000000000000000000000000000000000000000" {
+        let hash = sha256_file(&tmp)?;
+        if hash != *expected_sha256 {
+            std::fs::remove_file(&tmp).ok();
+            return Err(format!(
+                "Model SHA-256 mismatch: expected {} got {}",
+                expected_sha256, hash
+            ));
+        }
+    }
+
+    std::fs::rename(&tmp, &dest).map_err(|e| format!("Failed to finalize model file: {}", e))?;
 
     let _ = app_handle.emit(
         "model_download_progress",
@@ -509,9 +594,7 @@ const APP_VERSION: &str = "0.1.0";
 const UPDATE_URL: &str = "https://themaid.app/api/version";
 
 fn parse_version(v: &str) -> Option<Vec<u64>> {
-    v.split('.')
-        .map(|s| s.parse::<u64>().ok())
-        .collect()
+    v.split('.').map(|s| s.parse::<u64>().ok()).collect()
 }
 
 fn version_greater_than(a: &str, b: &str) -> bool {
@@ -907,10 +990,8 @@ mod tests {
 
     #[test]
     fn test_validate_path_rejects_symlink_escape() {
-        let tmp = std::env::temp_dir().join(format!(
-            "the-maid-symlink-test-{}",
-            std::process::id()
-        ));
+        let tmp =
+            std::env::temp_dir().join(format!("the-maid-symlink-test-{}", std::process::id()));
         std::fs::remove_dir_all(&tmp).ok();
         std::fs::create_dir_all(&tmp).unwrap();
 
@@ -925,20 +1006,15 @@ mod tests {
         std::os::windows::fs::symlink_file(&secret, &link).unwrap();
 
         let folders = vec![sandbox.to_string_lossy().to_string()];
-        let result = validate_path(
-            &link.to_string_lossy().to_string(),
-            &folders,
-        );
+        let result = validate_path(&link.to_string_lossy().to_string(), &folders);
         assert!(result.is_err(), "symlink escape should be rejected");
         std::fs::remove_dir_all(&tmp).ok();
     }
 
     #[test]
     fn test_validate_path_allows_symlink_within_sandbox() {
-        let tmp = std::env::temp_dir().join(format!(
-            "the-maid-symlink-in-test-{}",
-            std::process::id()
-        ));
+        let tmp =
+            std::env::temp_dir().join(format!("the-maid-symlink-in-test-{}", std::process::id()));
         std::fs::remove_dir_all(&tmp).ok();
         std::fs::create_dir_all(&tmp).unwrap();
 
@@ -953,10 +1029,8 @@ mod tests {
         std::os::windows::fs::symlink_file(&real, &link).unwrap();
 
         let folders = vec![sandbox.to_string_lossy().to_string()];
-        let result = validate_path(
-            &link.to_string_lossy().to_string(),
-            &folders,
-        );
+        let result = validate_path(&link.to_string_lossy().to_string(), &folders);
         assert!(result.is_ok(), "symlink within sandbox should be allowed");
         std::fs::remove_dir_all(&tmp).ok();
     }
+}

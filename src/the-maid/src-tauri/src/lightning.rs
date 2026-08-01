@@ -75,6 +75,11 @@ pub async fn fetch_lightning_invoice(
 ) -> Result<InvoiceResult, String> {
     validate_amount(amount_sats)?;
 
+    // Hardening (issue #27/#28): callback_url is the same endpoint we will later
+    // verify, so apply the same SSRF/host-pinning rules before making any request.
+    // This protects against future callers passing user-controlled URLs here.
+    validate_verify_url(callback_url)?;
+
     let client = http_client()?;
     let msats = amount_sats * 1000;
     let url = format!("{}?amount={}", callback_url.trim_end_matches('/'), msats);
@@ -116,8 +121,8 @@ pub async fn fetch_lightning_invoice(
 /// - Host must match the configured LNURL-pay host (pinned)
 /// - Rejects localhost, loopback, and private/reserved IP literals
 fn validate_verify_url(verify_url: &str) -> Result<(), String> {
-    let parsed = reqwest::Url::parse(verify_url)
-        .map_err(|e| format!("Invalid verify URL: {}", e))?;
+    let parsed =
+        reqwest::Url::parse(verify_url).map_err(|e| format!("Invalid verify URL: {}", e))?;
 
     if parsed.scheme() != "https" {
         return Err("Verify URL must use HTTPS".to_string());
@@ -330,7 +335,10 @@ mod tests {
         let url = server.url();
         server
             .mock("GET", "/")
-            .match_query(mockito::Matcher::UrlEncoded("amount".into(), "500000".into()))
+            .match_query(mockito::Matcher::UrlEncoded(
+                "amount".into(),
+                "500000".into(),
+            ))
             .with_status(200)
             .with_header("content-type", "application/json")
             .with_body(
@@ -416,7 +424,9 @@ mod tests {
             .mock("GET", "/")
             .with_status(200)
             .with_header("content-type", "application/json")
-            .with_body(r#"{"status":"ERROR","settled":false,"preimage":null,"reason":"Invoice expired"}"#)
+            .with_body(
+                r#"{"status":"ERROR","settled":false,"preimage":null,"reason":"Invoice expired"}"#,
+            )
             .create_async()
             .await;
 

@@ -19,7 +19,7 @@ from the_maid.face_tagger import (
     _clear_xmp_tag,
     _path_in_sandbox,
 )
-from tests.test_face_cluster import _make_embedding, _make_similar_embedding
+from test_face_cluster import _make_embedding, _make_similar_embedding
 
 
 # ─── Fixtures ───
@@ -61,16 +61,18 @@ class TestExifToolAvailability:
 class TestXMPTagWriting:
     @patch("the_maid.face_tagger._exiftool_available", return_value=True)
     @patch("the_maid.face_tagger._file_exists", return_value=True)
+    @patch("the_maid.face_tagger._exiftool_path", return_value="/usr/bin/exiftool")
     @patch("the_maid.face_tagger.subprocess.run")
-    def test_write_xmp_tag_success(self, mock_run, mock_exists, mock_avail):
+    def test_write_xmp_tag_success(self, mock_run, mock_path, mock_exists, mock_avail):
         mock_run.return_value = MagicMock(returncode=0, stderr="")
         result = _write_xmp_tag("/fake/path.jpg", "PersonInImage", "Sarah")
         assert result is True
         mock_run.assert_called_once()
         args = mock_run.call_args[0][0]
-        assert "exiftool" in args
+        assert args[0].endswith("exiftool")
         assert "-XMP:PersonInImage=Sarah" in args
         assert "-overwrite_original" in args
+        assert "--" in args
 
     @patch("the_maid.face_tagger._exiftool_available", return_value=False)
     def test_write_xmp_tag_no_exiftool(self, mock_avail):
@@ -99,8 +101,9 @@ class TestXMPTagWriting:
 
     @patch("the_maid.face_tagger._exiftool_available", return_value=True)
     @patch("the_maid.face_tagger._file_exists", return_value=True)
+    @patch("the_maid.face_tagger._exiftool_path", return_value="/usr/bin/exiftool")
     @patch("the_maid.face_tagger.subprocess.run")
-    def test_write_xmp_tag_uses_correct_prefix(self, mock_run, mock_exists, mock_avail):
+    def test_write_xmp_tag_uses_correct_prefix(self, mock_run, mock_path, mock_exists, mock_avail):
         """Caller must pass the bare tag name; function prepends the family prefix."""
         mock_run.return_value = MagicMock(returncode=0)
         _write_xmp_tag("/fake/path.jpg", "PersonInImage", "Sarah")
@@ -119,16 +122,17 @@ class TestXMPTagWriting:
 
     @patch("the_maid.face_tagger._exiftool_available", return_value=True)
     @patch("the_maid.face_tagger._file_exists", return_value=True)
+    @patch("the_maid.face_tagger._exiftool_path", return_value="/usr/bin/exiftool")
     @patch("the_maid.face_tagger.subprocess.run")
-    def test_write_xmp_tag_special_chars_in_label(self, mock_run, mock_exists, mock_avail):
-        """Labels with quotes/equals are passed as a single argv token."""
+    def test_write_xmp_tag_special_chars_in_label(self, mock_run, mock_path, mock_exists, mock_avail):
+        """ExifTool-special characters are stripped before invoking the binary."""
         mock_run.return_value = MagicMock(returncode=0, stderr="")
         label = 'Sarah="best" ; friend'
         result = _write_xmp_tag("/fake/path.jpg", "PersonInImage", label)
         assert result is True
         args = mock_run.call_args[0][0]
         tag_arg = [a for a in args if a.startswith("-XMP:PersonInImage=")][0]
-        assert tag_arg == f"-XMP:PersonInImage={label}"
+        assert tag_arg == '-XMP:PersonInImage=Sarah"best"  friend'
 
 
 # ─── rename_cluster_with_tags ───

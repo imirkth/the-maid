@@ -12,7 +12,7 @@ from unittest.mock import patch
 from the_maid.face_cluster import cluster_faces_from_scan
 from the_maid.face_tagger import rename_cluster_with_tags, get_clusters_for_ui
 from the_maid.face_cluster import FaceClusterer
-from tests.test_face_cluster import _make_embedding, _make_similar_embedding
+from test_face_cluster import _make_embedding, _make_similar_embedding
 
 
 @pytest.fixture

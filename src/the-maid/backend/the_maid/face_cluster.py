@@ -7,10 +7,13 @@ Unknown_Person_N labels assigned sequentially.
 
 import sqlite3
 import math
+import os
 from pathlib import Path
 from typing import List, Dict, Any, Optional, Tuple
 
 import numpy as np
+
+from .face_crypto import FaceEmbeddingCipher
 
 # Default DBSCAN params (can be overridden via settings)
 DEFAULT_EPS = 0.4        # cosine distance threshold (ArcFace embeddings are normalized)
@@ -28,7 +31,7 @@ CREATE TABLE IF NOT EXISTS embeddings (
     file_id     TEXT NOT NULL,          -- 8-char hex (ADR 0009)
     file_path   TEXT NOT NULL,
     face_index  INTEGER NOT NULL,       -- which face in the file (0-based)
-    embedding   BLOB NOT NULL,          -- 128D float32 vector
+    embedding   BLOB NOT NULL,          -- 128D float32 vector (encrypted at rest)
     confidence  REAL DEFAULT 0.0,
     cluster_id  INTEGER,                -- NULL until clustered
     cluster_label TEXT,                 -- "Unknown_Person_1" etc
@@ -172,11 +175,13 @@ class FaceClusterer:
         self.db_path = _db_path(db_path)
         self.eps = eps
         self.min_samples = min_samples
+        self._cipher: Optional[FaceEmbeddingCipher] = None
         self._init_db()
 
     def _init_db(self) -> None:
         """Create tables if not exists; guard against unsupported future schemas."""
         Path(self.db_path).parent.mkdir(parents=True, exist_ok=True)
+        is_fresh = not Path(self.db_path).exists()
         with sqlite3.connect(self.db_path) as conn:
             conn.executescript(_SCHEMA_SQL)
             existing = conn.execute(
@@ -194,6 +199,30 @@ class FaceClusterer:
                     )
             conn.execute("UPDATE schema_meta SET value = ? WHERE key = 'schema_version'",
                          (str(DB_SCHEMA_VERSION),))
+            # Ensure cipher is initialized (creates salt if needed) before migration.
+            self._cipher = FaceEmbeddingCipher(conn)
+            self._migrate_plaintext_embeddings(conn)
+
+        # Restrict DB file to owner only on Unix (P2 #26).
+        if is_fresh and os.name == "posix":
+            try:
+                os.chmod(self.db_path, 0o600)
+            except OSError:
+                pass  # Best effort; network filesystems may reject chmod.
+
+    def _migrate_plaintext_embeddings(self, conn) -> None:
+        """One-time migration: encrypt any existing plaintext float32 blobs."""
+        expected_len = EMBEDDING_DIM * 4  # 128 float32 values
+        rows = conn.execute(
+            "SELECT id, embedding FROM embeddings WHERE LENGTH(embedding) = ?",
+            (expected_len,),
+        ).fetchall()
+        for row_id, blob in rows:
+            encrypted = self._cipher.encrypt(bytes(blob))
+            conn.execute(
+                "UPDATE embeddings SET embedding = ? WHERE id = ?",
+                (encrypted, row_id),
+            )
 
     def store_embedding(self, file_id: str, file_path: str, face_index: int,
                         embedding: List[float], confidence: float = 0.0) -> int:
@@ -206,10 +235,13 @@ class FaceClusterer:
         if not np.all(np.isfinite(emb_arr)):
             raise ValueError("Embedding contains non-finite values (NaN/Inf)")
         with sqlite3.connect(self.db_path) as conn:
+            if self._cipher is None:
+                self._cipher = FaceEmbeddingCipher(conn)
+            encrypted = self._cipher.encrypt(emb_arr.tobytes())
             cur = conn.execute(
                 "INSERT INTO embeddings (file_id, file_path, face_index, embedding, confidence) "
                 "VALUES (?, ?, ?, ?, ?)",
-                (file_id, file_path, face_index, emb_arr.tobytes(), confidence)
+                (file_id, file_path, face_index, encrypted, confidence)
             )
             return cur.lastrowid
 
@@ -242,13 +274,21 @@ class FaceClusterer:
                     confidence = float(confidence)
                 else:
                     continue
+                if self._cipher is None:
+                    self._cipher = FaceEmbeddingCipher(conn)
+                encrypted = self._cipher.encrypt(emb_arr.tobytes())
                 conn.execute(
                     "INSERT INTO embeddings (file_id, file_path, face_index, embedding, confidence) "
                     "VALUES (?, ?, ?, ?, ?)",
-                    (file_id, file_path, face_index, emb_arr.tobytes(), confidence)
+                    (file_id, file_path, face_index, encrypted, confidence)
                 )
                 count += 1
         return count
+
+    def _decrypt_row_embedding(self, blob: bytes) -> np.ndarray:
+        """Decrypt an embedding blob and return a float32 numpy array."""
+        plaintext = self._cipher.decrypt(blob)
+        return np.frombuffer(plaintext, dtype=np.float32)
 
     def get_all_embeddings(self) -> Tuple[np.ndarray, List[Dict[str, Any]]]:
         """
@@ -264,10 +304,14 @@ class FaceClusterer:
         if not rows:
             return np.array([]), []
 
+        if self._cipher is None:
+            with sqlite3.connect(self.db_path) as conn:
+                self._cipher = FaceEmbeddingCipher(conn)
+
         vectors = []
         metadata = []
         for row in rows:
-            emb = np.frombuffer(row[4], dtype=np.float32)
+            emb = self._decrypt_row_embedding(row[4])
             vectors.append(emb)
             metadata.append({
                 "row_id": row[0],
@@ -326,6 +370,9 @@ class FaceClusterer:
         # Build previous custom-labeled centroids from current DB before overwrite.
         custom_centroids: List[Tuple[np.ndarray, str]] = []
         if metadata:
+            if self._cipher is None:
+                with sqlite3.connect(self.db_path) as conn:
+                    self._cipher = FaceEmbeddingCipher(conn)
             with sqlite3.connect(self.db_path) as conn:
                 rows = conn.execute(
                     "SELECT id, cluster_id, cluster_label, embedding FROM embeddings"
@@ -338,7 +385,7 @@ class FaceClusterer:
                     continue
                 prev_by_cluster.setdefault(cid, {"label": clabel, "vectors": []})
                 prev_by_cluster[cid]["vectors"].append(
-                    np.frombuffer(emb_blob, dtype=np.float32)
+                    self._decrypt_row_embedding(emb_blob)
                 )
             for info in prev_by_cluster.values():
                 if info["vectors"]:

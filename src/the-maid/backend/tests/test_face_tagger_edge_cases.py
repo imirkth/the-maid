@@ -16,7 +16,7 @@ from the_maid.face_tagger import (
     rename_cluster_with_tags,
     get_clusters_for_ui,
 )
-from tests.test_face_cluster import _make_embedding, _make_similar_embedding
+from test_face_cluster import _make_embedding, _make_similar_embedding
 
 
 @pytest.fixture
