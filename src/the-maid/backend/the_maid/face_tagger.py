@@ -5,7 +5,8 @@ Retroactive: naming a cluster writes to ALL photos in that cluster.
 """
 
 import re
-import subprocess
+import subprocess  # nosec B404
+# only used to invoke the fixed-path exiftool binary with a literal argv list.
 import shutil
 from pathlib import Path
 from typing import List, Dict, Any, Optional
