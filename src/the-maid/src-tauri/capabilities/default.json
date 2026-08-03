@@ -3,6 +3,6 @@
   "description": "Default app permissions for The Maid",
   "windows": ["main"],
   "permissions": [
-    "shell:allow-open-url"
+    "shell:allow-open"
   ]
 }

@@ -6,10 +6,12 @@ use serde::{Deserialize, Serialize};
 
 /// LNURL-pay endpoint baked into the release binary.
 /// Set at build time: MAID_DONATION_LNURL=https://your-node.example/lnurl-pay cargo tauri build
-const DONATION_LNURL: &str = env!(
-    "MAID_DONATION_LNURL",
-    "https://PLACEHOLDER.themaid.app/lnurl-pay"
-);
+// ponytail: env var at build time, fallback to placeholder for dev builds.
+// Release builds set MAID_DONATION_LNURL via cargo build-time env.
+const DONATION_LNURL: &str = match option_env!("MAID_DONATION_LNURL") {
+    Some(url) => url,
+    None => "https://PLACEHOLDER.themaid.app/lnurl-pay",
+};
 
 const DEFAULT_MEMO: &str = "Support The Maid";
 const MAX_AMOUNT_SATS: u64 = 10_000_000;
@@ -133,16 +135,19 @@ fn validate_verify_url(verify_url: &str) -> Result<(), String> {
         .ok_or_else(|| "Verify URL missing host".to_string())?;
 
     // Reject IP-literal hosts (loopback, private, link-local, etc.)
-    if let Some(ip) = parsed.host() {
-        if let std::net::IpAddr::V4(v4) = ip {
-            if v4.is_loopback() || v4.is_private() || v4.is_link_local() || v4.is_multicast() {
-                return Err("Verify URL host not allowed".to_string());
+    if let Some(host) = parsed.host() {
+        match host {
+            url::Host::Ipv4(v4) => {
+                if v4.is_loopback() || v4.is_private() || v4.is_link_local() || v4.is_multicast() {
+                    return Err("Verify URL host not allowed".to_string());
+                }
             }
-        }
-        if let std::net::IpAddr::V6(v6) = ip {
-            if v6.is_loopback() || v6.is_multicast() {
-                return Err("Verify URL host not allowed".to_string());
+            url::Host::Ipv6(v6) => {
+                if v6.is_loopback() || v6.is_multicast() {
+                    return Err("Verify URL host not allowed".to_string());
+                }
             }
+            url::Host::Domain(_) => {}
         }
     }
 

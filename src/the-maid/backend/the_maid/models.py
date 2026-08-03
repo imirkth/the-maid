@@ -1,6 +1,11 @@
 """
 The Maid — LLM Manager
-Handles local model loading and inference via llama-cpp-python.
+Handles local model loading and inference via a local llama.cpp HTTP server.
+
+The Maid no longer embeds llama-cpp-python directly because that package
+dragged in the vulnerable ``diskcache`` dependency (PYSEC-2026-2447).  Instead
+we talk to a local ``llama-server`` or equivalent OpenAI-compatible endpoint.
+Set ``THE_MAID_LLM_BASE_URL`` to point at the server (default: http://127.0.0.1:8080).
 """
 
 import json
@@ -8,6 +13,8 @@ import os
 import re
 from pathlib import Path
 from typing import Optional, Dict, Any
+
+import requests
 
 from .sandbox import validate_path
 
@@ -30,32 +37,49 @@ class LLMManager:
         self.llm = None
         self._loaded = False
 
-    def load_model(self) -> bool:
-        """Load the GGUF model. Returns True if successful."""
-        try:
-            from llama_cpp import Llama
+    @staticmethod
+    def _server_url() -> str:
+        return os.environ.get("THE_MAID_LLM_BASE_URL", "http://127.0.0.1:8080").rstrip("/")
 
-            if not self.model_path.exists():
-                print(f"[LLM] Model not found at {self.model_path}")
-                print(f"[LLM] Run: python -m the_maid.models download")
+    def _complete(self, prompt: str, *, max_tokens: int = 256, temperature: float = 0.1) -> Dict[str, Any]:
+        """Call the local llama.cpp /completion endpoint."""
+        url = f"{self._server_url()}/completion"
+        response = requests.post(
+            url,
+            json={
+                "prompt": prompt,
+                "max_tokens": max_tokens,
+                "temperature": temperature,
+                "stop": ["\n}"],
+            },
+            timeout=120,
+        )
+        response.raise_for_status()
+        data = response.json()
+        content = data.get("content", data.get("choices", [{}])[0].get("text", ""))
+        return {"choices": [{"text": content}]}
+
+    def load_model(self) -> bool:
+        """Probe the local llama.cpp server. Returns True if it responds."""
+        try:
+            url = f"{self._server_url()}/health"
+            response = requests.get(url, timeout=5)
+            if response.status_code != 200:
+                print(f"[LLM] Local LLM server not ready: {response.status_code}")
                 return False
 
-            print(f"[LLM] Loading model: {self.model_path}")
-            self.llm = Llama(
-                model_path=str(self.model_path),
-                n_ctx=4096,
-                n_threads=4,
-                verbose=False,
-            )
+            self.llm = self._complete
             self._loaded = True
-            print("[LLM] Model loaded successfully")
+            print(f"[LLM] Connected to local LLM server at {self._server_url()}")
             return True
-
-        except ImportError:
-            print("[LLM] llama-cpp-python not installed. Run: pip install llama-cpp-python")
+        except requests.exceptions.ConnectionError:
+            print(
+                "[LLM] No local LLM server found. "
+                "Start one with: llama-server -m <model.gguf> --port 8080"
+            )
             return False
         except Exception as e:
-            print(f"[LLM] Failed to load model: {e}")
+            print(f"[LLM] Failed to connect to local LLM server: {e}")
             return False
 
     def categorize_file(

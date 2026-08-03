@@ -4070,6 +4070,7 @@ dependencies = [
  "tauri-plugin-shell",
  "tempfile",
  "tokio",
+ "url",
 ]
 
 [[package]]

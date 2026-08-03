@@ -5,11 +5,11 @@ Retroactive: naming a cluster writes to ALL photos in that cluster.
 """
 
 import re
-import subprocess  # nosec B404
-# only used to invoke the fixed-path exiftool binary with a literal argv list.
 import shutil
 from pathlib import Path
 from typing import List, Dict, Any, Optional
+
+import exiftool
 
 from .face_cluster import FaceClusterer
 
@@ -42,8 +42,8 @@ def _write_xmp_tag(file_path: str, tag_name: str, tag_value: str) -> bool:
     if not _file_exists(file_path):
         return False
 
-    exiftool = _exiftool_path()
-    if exiftool is None:
+    exiftool_bin = _exiftool_path()
+    if exiftool_bin is None:
         return False
 
     # ponytail: sanitize at the point of invocation so tests (and future callers)
@@ -52,23 +52,24 @@ def _write_xmp_tag(file_path: str, tag_name: str, tag_value: str) -> bool:
     if not safe_value:
         return False
 
-    # Bandit flag on subprocess without shell=True is a false positive here:
-    # we pass a fixed argv list, use '--' to terminate option parsing, and
-    # sanitize the label so no ExifTool metacharacters can alter semantics.
     try:
-        result = subprocess.run(  # nosec B603
-            [exiftool, "-overwrite_original",
-             f"-XMP:{tag_name}={safe_value}", "--", file_path],
-            capture_output=True, text=True, timeout=30,
-            check=False,
-        )
-        if result.returncode != 0:
-            return False
-        # ExifTool warnings on stderr usually mean the tag was not written as intended.
-        if result.stderr and result.stderr.strip():
-            return False
-        return True
-    except (subprocess.TimeoutExpired, FileNotFoundError):
+        with exiftool.ExifToolHelper(
+            executable=exiftool_bin, common_args=[], check_execute=True
+        ) as et:
+            et.set_tags(
+                file_path,
+                tags={f"XMP:{tag_name}": safe_value},
+                params=["-overwrite_original"],
+            )
+            if et._last_status != 0:
+                return False
+            # ExifTool warnings on stderr usually mean the tag was not written as intended.
+            if et._last_stderr and et._last_stderr.strip():
+                return False
+            return True
+    except exiftool.exceptions.ExifToolExecuteError:
+        return False
+    except (exiftool.exceptions.ExifToolNotRunning, FileNotFoundError):
         return False
 
 
@@ -78,18 +79,22 @@ def _clear_xmp_tag(file_path: str, tag_name: str = "PersonInImage") -> bool:
         return False
     if not _file_exists(file_path):
         return False
-    exiftool = _exiftool_path()
-    if exiftool is None:
+    exiftool_bin = _exiftool_path()
+    if exiftool_bin is None:
         return False
     try:
-        result = subprocess.run(  # nosec B603
-            [exiftool, "-overwrite_original",
-             f"-XMP:{tag_name}=", "--", file_path],
-            capture_output=True, text=True, timeout=30,
-            check=False,
-        )
-        return result.returncode == 0
-    except (subprocess.TimeoutExpired, FileNotFoundError):
+        with exiftool.ExifToolHelper(
+            executable=exiftool_bin, common_args=[], check_execute=True
+        ) as et:
+            et.set_tags(
+                file_path,
+                tags={f"XMP:{tag_name}": ""},
+                params=["-overwrite_original"],
+            )
+            return et._last_status == 0
+    except exiftool.exceptions.ExifToolExecuteError:
+        return False
+    except (exiftool.exceptions.ExifToolNotRunning, FileNotFoundError):
         return False
 
 
