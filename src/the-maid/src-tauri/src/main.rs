@@ -2,7 +2,7 @@
 // Prevents additional console window on Windows in release
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
-use tauri::Manager;
+use tauri::{Emitter, Manager};
 use std::path::PathBuf;
 use std::sync::Arc;
 
@@ -23,7 +23,7 @@ pub struct AppState {
 fn resolve_backend_path(app: &tauri::AppHandle) -> PathBuf {
     if cfg!(target_os = "windows") {
         app.path()
-            .resolve("backend/the_maid_backend.exe", tauri::BaseDirectory::Resource)
+            .resolve("backend/the_maid_backend.exe", tauri::path::BaseDirectory::Resource)
             .unwrap_or_else(|_| {
                 #[cfg(debug_assertions)]
                 {
@@ -49,7 +49,7 @@ fn resolve_backend_path(app: &tauri::AppHandle) -> PathBuf {
         #[cfg(not(debug_assertions))]
         {
             app.path()
-                .resolve("backend/run.py", tauri::BaseDirectory::Resource)
+                .resolve("backend/run.py", tauri::path::BaseDirectory::Resource)
                 .expect("Failed to resolve bundled backend run.py")
         }
     }

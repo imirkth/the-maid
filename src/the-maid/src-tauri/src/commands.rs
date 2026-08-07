@@ -170,6 +170,16 @@ fn validate_path(path: &str, sandbox_folders: &[String]) -> Result<String, Strin
         return Ok(expanded);
     }
 
+    // ponytail: resolve bare relative paths to $HOME so canonicalize can find them
+    let expanded = if expanded.starts_with('/') || expanded.contains(":\\") || expanded.contains(":/") {
+        expanded
+    } else {
+        let home = std::env::var("HOME")
+            .or_else(|_| std::env::var("USERPROFILE"))
+            .unwrap_or_default();
+        format!("{}/{}", home, expanded)
+    };
+
     // ponytail: resolve symlinks before containment check, matching Python sandbox.py
     let canonical = std::fs::canonicalize(Path::new(&expanded))
         .map_err(|e| format!("Failed to resolve path '{}': {}", path, e))?;
@@ -467,6 +477,8 @@ pub async fn download_model(model_id: String, app_handle: tauri::AppHandle) -> R
         .iter()
         .find(|(id, _, _)| *id == model_id)
         .ok_or_else(|| format!("Unknown model: {}", model_id))?;
+    let url = *url;
+    let expected_sha256 = *expected_sha256;
 
     let dir = models_dir()?;
     std::fs::create_dir_all(&dir).map_err(|e| format!("Failed to create models dir: {}", e))?;
@@ -501,7 +513,8 @@ pub async fn download_model(model_id: String, app_handle: tauri::AppHandle) -> R
         // restart from scratch.
         if resume_from > 0 {
             std::fs::remove_file(&tmp).ok();
-            return download_model(model_id, app_handle).await;
+            // ponytail: Box::pin to break infinite async fn size
+            return Box::pin(download_model(model_id, app_handle)).await;
         }
         return Err(format!("Server error: {}", resp.status()));
     }
@@ -693,9 +706,9 @@ pub async fn get_model_status() -> Result<Vec<ModelStatus>, String> {
     let models_dir = PathBuf::from(home).join(".the-maid").join("models");
 
     let models = vec![
-        ("text", "Text LLM", 500),
-        ("pdf", "PDF OCR Model", 1000),
-        ("face", "Face Recognition Model", 100),
+        ("text", "Text LLM", 500_u64),
+        ("pdf", "PDF OCR Model", 1000_u64),
+        ("face", "Face Recognition Model", 100_u64),
     ];
 
     Ok(models
@@ -717,7 +730,7 @@ pub async fn get_model_status() -> Result<Vec<ModelStatus>, String> {
             ModelStatus {
                 id: id.to_string(),
                 name: name.to_string(),
-                size_mb,
+                size_mb: *size_mb,
                 downloaded,
                 path,
             }
@@ -838,18 +851,29 @@ mod tests {
 
     #[test]
     fn test_validate_path_allows_sandbox_folders() {
-        let home = std::env::var("HOME").unwrap_or_default();
+        // ponytail: use own temp HOME to avoid race with settings tests
+        let tmp = std::env::temp_dir().join(format!("the-maid-validate-test-{}", std::process::id()));
+        std::fs::create_dir_all(tmp.join("Desktop")).unwrap();
+        std::fs::write(tmp.join("Desktop").join("file.txt"), "test").unwrap();
+        std::env::set_var("HOME", &tmp);
         let folders = vec!["Desktop".to_string(), "Downloads".to_string()];
-        let result = validate_path(&format!("{}/Desktop/file.txt", home), &folders);
+        let result = validate_path(&format!("{}/Desktop/file.txt", tmp.to_string_lossy()), &folders);
         assert!(result.is_ok());
+        std::fs::remove_dir_all(&tmp).ok();
     }
 
     #[test]
     fn test_validate_path_rejects_outside_sandbox() {
         let folders = vec!["Desktop".to_string()];
-        let result = validate_path("/tmp/random/file.txt", &folders);
+        // ponytail: create a real temp file outside the sandbox to pass canonicalize
+        let tmp = std::env::temp_dir().join(format!("the-maid-test-outside-{}", std::process::id()));
+        std::fs::create_dir_all(&tmp).unwrap();
+        let test_file = tmp.join("random.txt");
+        std::fs::write(&test_file, "test").unwrap();
+        let result = validate_path(&test_file.to_string_lossy(), &folders);
         assert!(result.is_err());
         assert!(result.unwrap_err().contains("outside the sandbox"));
+        std::fs::remove_dir_all(&tmp).ok();
     }
 
     #[test]
@@ -861,28 +885,43 @@ mod tests {
 
     #[test]
     fn test_validate_path_expands_tilde() {
-        let home = std::env::var("HOME").unwrap_or_default();
+        // ponytail: use own temp HOME to avoid race with settings tests
+        let tmp = std::env::temp_dir().join(format!("the-maid-tilde-test-{}", std::process::id()));
+        std::fs::create_dir_all(tmp.join("Desktop")).unwrap();
+        std::fs::write(tmp.join("Desktop").join("file.txt"), "test").unwrap();
+        std::env::set_var("HOME", &tmp);
         let folders = vec!["Desktop".to_string()];
         let result = validate_path("~/Desktop/file.txt", &folders);
         assert!(result.is_ok());
-        assert_eq!(result.unwrap(), format!("{}/Desktop/file.txt", home));
+        assert_eq!(result.unwrap(), format!("{}/Desktop/file.txt", tmp.to_string_lossy()));
+        std::fs::remove_dir_all(&tmp).ok();
     }
 
     #[test]
     fn test_validate_path_accepts_bare_folder_name() {
-        let home = std::env::var("HOME").unwrap_or_default();
+        // ponytail: use own temp HOME to avoid race with settings tests
+        let tmp = std::env::temp_dir().join(format!("the-maid-bare-test-{}", std::process::id()));
+        std::fs::create_dir_all(tmp.join("Desktop")).unwrap();
+        std::fs::write(tmp.join("Desktop").join("file.txt"), "test").unwrap();
+        std::env::set_var("HOME", &tmp);
         let folders = vec!["Desktop".to_string()];
         let result = validate_path("Desktop/file.txt", &folders);
         assert!(result.is_ok());
-        assert_eq!(result.unwrap(), format!("{}/Desktop/file.txt", home));
+        assert_eq!(result.unwrap(), format!("{}/Desktop/file.txt", tmp.to_string_lossy()));
+        std::fs::remove_dir_all(&tmp).ok();
     }
 
     #[test]
     fn test_validate_path_accepts_absolute_sandbox_path() {
-        let home = std::env::var("HOME").unwrap_or_default();
+        // ponytail: use own temp HOME to avoid race with settings tests
+        let tmp = std::env::temp_dir().join(format!("the-maid-abs-test-{}", std::process::id()));
+        std::fs::create_dir_all(tmp.join("Desktop")).unwrap();
+        std::fs::write(tmp.join("Desktop").join("file.txt"), "test").unwrap();
+        std::env::set_var("HOME", &tmp);
         let folders = vec!["Desktop".to_string()];
-        let result = validate_path(&format!("{}/Desktop/file.txt", home), &folders);
+        let result = validate_path(&format!("{}/Desktop/file.txt", tmp.to_string_lossy()), &folders);
         assert!(result.is_ok());
+        std::fs::remove_dir_all(&tmp).ok();
     }
 
     #[test]

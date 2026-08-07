@@ -37,7 +37,7 @@ impl FaceClusterSettings {
     }
 }
 
-#[derive(Serialize, Deserialize, Debug, Clone, Default)]
+#[derive(Serialize, Deserialize, Debug, Clone, Default, PartialEq)]
 pub struct BucketEntry {
     pub id: String,
     pub name: String,
@@ -172,10 +172,15 @@ mod tests {
     use super::*;
 
     use std::sync::atomic::{AtomicU64, Ordering};
+    use std::sync::Mutex;
 
     static TEST_COUNTER: AtomicU64 = AtomicU64::new(0);
 
-    fn setup_temp_settings() -> PathBuf {
+    // ponytail: HOME env var is process-global; tests that change it must be serialized.
+    static HOME_LOCK: Mutex<()> = Mutex::new(());
+
+    fn setup_temp_settings() -> (PathBuf, std::sync::MutexGuard<'static, ()>) {
+        let guard = HOME_LOCK.lock().unwrap();
         let count = TEST_COUNTER.fetch_add(1, Ordering::SeqCst);
         let tmp =
             std::env::temp_dir().join(format!("the-maid-test-{}-{}", std::process::id(), count));
@@ -184,12 +189,12 @@ mod tests {
         std::fs::create_dir_all(&tmp).unwrap();
         // ponytail: override HOME for test isolation
         std::env::set_var("HOME", &tmp);
-        tmp
+        (tmp, guard)
     }
 
     #[test]
     fn test_default_settings() {
-        let tmp = setup_temp_settings();
+        let (tmp, _guard) = setup_temp_settings();
         // No settings file → defaults
         let settings = Settings::load().unwrap();
         assert!(settings.first_run);
@@ -224,7 +229,7 @@ mod tests {
 
     #[test]
     fn test_save_atomic_leaves_no_temp_file() {
-        let tmp = setup_temp_settings();
+        let (tmp, _guard) = setup_temp_settings();
         let mut settings = Settings::load().unwrap();
         settings.complete_first_run();
         settings.save().unwrap();
@@ -238,7 +243,7 @@ mod tests {
 
     #[test]
     fn test_save_and_load() {
-        let tmp = setup_temp_settings();
+        let (tmp, _guard) = setup_temp_settings();
         let mut settings = Settings::load().unwrap();
         settings.add_folder("Videos");
         settings.add_bucket("Work", "~/Documents/Work");
@@ -256,6 +261,7 @@ mod tests {
     #[test]
     fn test_add_remove_folder() {
         let mut settings = Settings::default();
+        settings.sandbox_folders.clear();
         settings.add_folder("Desktop");
         settings.add_folder("Desktop"); // dup ignored
         assert_eq!(settings.sandbox_folders.len(), 1);
@@ -301,7 +307,7 @@ mod tests {
 
     #[test]
     fn test_face_cluster_roundtrip() {
-        let tmp = setup_temp_settings();
+        let (tmp, _guard) = setup_temp_settings();
         let mut settings = Settings::load().unwrap();
         settings.face_cluster.eps = 0.25;
         settings.face_cluster.min_samples = 5;

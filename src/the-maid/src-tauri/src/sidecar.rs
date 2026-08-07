@@ -256,6 +256,7 @@ mod tests {
         std::fs::create_dir_all(&dir).unwrap();
         let script = dir.join("crash_script.py");
         std::fs::write(&script, "import sys; sys.exit(1)\n").unwrap();
+        script
     }
 
     fn make_crash_then_ready_script() -> PathBuf {
