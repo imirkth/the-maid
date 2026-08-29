@@ -162,8 +162,13 @@ class LLMManager:
         # Single LLM call for ALL files — avoids per-folder fragmentation
         # where each subfolder becomes its own top-level category.
         # The manifest includes folder context so the LLM sees the full hierarchy.
+        # Accumulated tree from previous batches — fed to each new batch so the
+        # LLM can place files consistently (e.g. all Eleanor photos in Photos > Eleanor,
+        # not split across Photos/Personal/Uncategorized).
+        accumulated_tree: List[Dict[str, Any]] = []
+
         if len(indexed) <= MAX_FILES_PER_SUBAGENT:
-            tree = self._classify_batch(indexed)
+            tree = self._classify_batch(indexed, accumulated_tree)
         else:
             # Chunk by MAX_FILES_PER_SUBAGENT, then merge
             sub_trees = []
@@ -172,8 +177,10 @@ class LLMManager:
             _batch_start = _time.monotonic()
             for chunk_idx, chunk_start in enumerate(range(0, len(indexed), MAX_FILES_PER_SUBAGENT)):
                 chunk = indexed[chunk_start:chunk_start + MAX_FILES_PER_SUBAGENT]
-                tree = self._classify_batch(chunk)
+                tree = self._classify_batch(chunk, accumulated_tree)
                 sub_trees.append(tree)
+                # Grow the accumulated tree for the next batch
+                accumulated_tree = self._merge_into_accumulated(accumulated_tree, tree)
                 import json as _json
                 progress = (chunk_idx + 1) / total_chunks
                 elapsed = _time.monotonic() - _batch_start
@@ -192,12 +199,8 @@ class LLMManager:
                     "eta_seconds": round(eta, 1),
                 }), flush=True)
                 print(f"[LLM] Batch {done}/{total_chunks} done ({len(chunk)} files)", flush=True)
-            # Merge chunks
-            if len(sub_trees) == 1:
-                tree = sub_trees[0]
-            else:
-                merged = self._programmatic_merge(sub_trees)
-                tree = merged.get("tree", [])
+            # Final tree is the accumulated tree (already merged incrementally)
+            tree = accumulated_tree if len(sub_trees) > 1 else sub_trees[0]
 
         # Review agent — LLM fixes fallback buckets
         reviewed_tree = self._review_agent(tree, indexed)
@@ -208,10 +211,12 @@ class LLMManager:
 
         return {"tree": reviewed_tree}
 
-    def _classify_batch(self, files: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+    def _classify_batch(self, files: List[Dict[str, Any]], accumulated_tree: Optional[List[Dict[str, Any]]] = None) -> List[Dict[str, Any]]:
         """
         Classify a batch of files in a single LLM call.
         The manifest includes folder context so the LLM sees the full directory hierarchy.
+        If accumulated_tree is provided, the LLM also sees categories from previous batches
+        and is instructed to reuse them for consistency.
         Returns a tree: [{"category": ..., "subbuckets": [{"subcategory": ..., "files": [...]}], "rationale": ...}]
         """
         if not files:
@@ -224,6 +229,13 @@ class LLMManager:
         registry_hint = self._registry.build_hint()
         if registry_hint:
             registry_hint = f"\n{registry_hint}\nReuse these categories when appropriate. Add new ones only if a file doesn't fit any existing category.\n"
+
+        # Build accumulated tree hint from previous batches
+        tree_hint = ""
+        if accumulated_tree:
+            tree_summary = self._summarize_tree(accumulated_tree)
+            if tree_summary:
+                tree_hint = f"\nCATEGORIES FROM PREVIOUS BATCHES (reuse these for consistency — do not create duplicate categories for the same topic):\n{tree_summary}\n"
 
         prompt = f"""You are a file organizer. Your job is to PROPOSE a better folder structure for the user's files.
 The user already has these files in folders. The existing folder structure is their current organization.
@@ -292,7 +304,7 @@ Example (loose files with no folder — categorize from content):
 9: AI Art
 10: screenshot_2024_03_15.png | (no text content, file type: .png)
 10: Screenshots
-{registry_hint}
+{tree_hint}{registry_hint}
 Now categorize these {file_count} files:
 {manifest}
 
@@ -313,6 +325,75 @@ Output one line per file: "id: Category > Subcategory" (or "id: Category" if no 
 
         # Fallback to extension rules
         return self._fallback_tree(files).get("tree", [])
+
+    @staticmethod
+    def _summarize_tree(tree: List[Dict[str, Any]]) -> str:
+        """Compact one-line-per-category summary of the accumulated tree for the LLM prompt.
+        e.g. 'Photos > Eleanor (12 files)\nFinance > Cryptocurrency (3 files)'"""
+        lines = []
+        for node in tree:
+            cat = node.get("category", "")
+            count = node.get("count", 0)
+            subs = node.get("subbuckets", [])
+            if subs:
+                sub_names = [s.get("subcategory", "") for s in subs if s.get("subcategory")]
+                if sub_names:
+                    lines.append(f"{cat} > {', '.join(sub_names)} ({count} files)")
+                else:
+                    lines.append(f"{cat} ({count} files)")
+            else:
+                lines.append(f"{cat} ({count} files)")
+        return "\n".join(lines) if lines else ""
+
+    def _merge_into_accumulated(self, accumulated: List[Dict[str, Any]], new_tree: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+        """Merge a new batch's tree into the accumulated tree.
+        Same-category + same-subcategory buckets get their file lists combined.
+        Category/subcategory matching is case-insensitive."""
+        # Build a lookup from the accumulated tree
+        lookup: Dict[str, Dict[str, Dict[str, Any]]] = {}
+        for node in accumulated:
+            cat = node.get("category", "")
+            cat_key = cat.lower()
+            lookup[cat_key] = {}
+            for sub in node.get("subbuckets", []):
+                sub_name = sub.get("subcategory", "")
+                sub_key = sub_name.lower()
+                lookup[cat_key][sub_key] = sub
+
+        # Merge new tree nodes into the accumulated tree
+        for new_node in new_tree:
+            cat = new_node.get("category", "")
+            cat_key = cat.lower()
+            if cat_key not in lookup:
+                # New top-level category — append as-is
+                accumulated.append(new_node)
+                lookup[cat_key] = {}
+                for sub in new_node.get("subbuckets", []):
+                    sub_name = sub.get("subcategory", "")
+                    lookup[cat_key][sub_name.lower()] = sub
+            else:
+                # Existing category — merge subbuckets
+                existing_node = next(n for n in accumulated if n.get("category", "").lower() == cat_key)
+                for new_sub in new_node.get("subbuckets", []):
+                    sub_name = new_sub.get("subcategory", "")
+                    sub_key = sub_name.lower()
+                    if sub_key in lookup[cat_key]:
+                        # Existing subcategory — combine file lists
+                        existing_sub = lookup[cat_key][sub_key]
+                        existing_files = list(dict.fromkeys(existing_sub.get("files", []) + new_sub.get("files", [])))
+                        existing_sub["files"] = existing_files
+                    else:
+                        # New subcategory under existing category
+                        existing_node.setdefault("subbuckets", []).append(new_sub)
+                        lookup[cat_key][sub_key] = new_sub
+                # Update count
+                existing_node["count"] = sum(len(s.get("files", [])) for s in existing_node.get("subbuckets", []))
+
+        # Recalculate all counts
+        for node in accumulated:
+            node["count"] = sum(len(s.get("files", [])) for s in node.get("subbuckets", []))
+
+        return accumulated
 
     def _build_tree_from_assignments(self, assignments: List[Tuple[int, str, str]]) -> List[Dict[str, Any]]:
         """Build a hierarchical tree from (file_id, category, subcategory) assignments."""
