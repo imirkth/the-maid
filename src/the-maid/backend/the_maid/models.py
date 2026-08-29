@@ -20,6 +20,7 @@ Features:
 import json
 import os
 import re
+import math
 import requests
 from pathlib import Path
 from difflib import SequenceMatcher
@@ -435,12 +436,58 @@ Now categorize all {total_items} items:
         ym = LLMManager._parse_photo_date(f)
         return ym[:4] if ym else None
 
+    @staticmethod
+    def _parse_photo_gps(f: Dict[str, Any]) -> Optional[Tuple[float, float]]:
+        """Extract (lat, lon) from EXIF GPS data, or None."""
+        exif = f.get("exif", {})
+        if exif and exif.get("gps_lat") is not None and exif.get("gps_lon") is not None:
+            return (exif["gps_lat"], exif["gps_lon"])
+        return None
+
+    @staticmethod
+    def _gps_distance_km(a: Tuple[float, float], b: Tuple[float, float]) -> float:
+        """Rough distance between two lat/lon points in km (equirectangular approx)."""
+        dlat = abs(a[0] - b[0]) * 111
+        dlon = abs(a[1] - b[1]) * 111 * math.cos(math.radians(a[0]))
+        return math.sqrt(dlat * dlat + dlon * dlon)
+
+    # Coarse city lookup — offline reverse geocoding for common locations
+    _CITY_TABLE = [
+        (-33.87, 151.18, "Sydney"),
+        (43.53, 5.45, "Marseille"),
+        (43.46, 5.58, "Aix-en-Provence"),
+        (32.04, 120.78, "Jiangdu"),
+        (-37.81, 144.96, "Melbourne"),
+        (-31.95, 115.86, "Perth"),
+        (-27.47, 153.02, "Brisbane"),
+        (48.85, 2.35, "Paris"),
+        (51.51, -0.13, "London"),
+        (40.71, -74.01, "New York"),
+        (35.68, 139.69, "Tokyo"),
+        (1.35, 103.82, "Singapore"),
+        (25.04, 121.57, "Taipei"),
+    ]
+
+    @classmethod
+    def _nearest_city(cls, lat: float, lon: float, max_dist_km: float = 100) -> Optional[str]:
+        """Find nearest city within max_dist_km using the built-in city table."""
+        best = None
+        best_dist = float('inf')
+        for c_lat, c_lon, name in cls._CITY_TABLE:
+            dist = cls._gps_distance_km((lat, lon), (c_lat, c_lon))
+            if dist < best_dist:
+                best_dist = dist
+                best = name
+        return best if best_dist <= max_dist_km else None
+
     def _subcluster_photos(self, tree: List[Dict[str, Any]], files: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
-        """Post-process: split large photo subcategories by year/month.
+        """Post-process: split large photo subcategories by year/month, then by location if GPS varies.
         Only applies to Photos category subbuckets with > 50 files.
-        Uses EXIF datetime or filename date patterns (20230506_...) for clustering."""
+        Uses EXIF datetime or filename date patterns (20230506_...) for date clustering.
+        Uses EXIF GPS to split month clusters by location when they span >50km."""
         PHOTO_SUBCLUSTER_THRESHOLD = 50
         MONTH_SPLIT_THRESHOLD = 20
+        GPS_SPLIT_THRESHOLD_KM = 50  # split month cluster if GPS points span >50km
 
         for node in tree:
             if node.get("category") != "Photos":
@@ -486,10 +533,10 @@ Now categorize all {total_items} items:
                             else:
                                 month_groups.setdefault(f"{year}-unknown", []).append(fid)
                         for ym in sorted(month_groups.keys()):
-                            new_subbuckets.append({
-                                "subcategory": f"{sub_name} {ym}" if sub_name else ym,
-                                "files": month_groups[ym],
-                            })
+                            m_ids = month_groups[ym]
+                            # Try to split month cluster by GPS location
+                            sub_splits = self._split_by_location(m_ids, files, sub_name, ym, GPS_SPLIT_THRESHOLD_KM)
+                            new_subbuckets.extend(sub_splits)
 
                 # Attach undated files
                 if undated:
@@ -501,6 +548,52 @@ Now categorize all {total_items} items:
             node["subbuckets"] = new_subbuckets
             node["count"] = sum(len(s.get("files", [])) for s in new_subbuckets)
         return tree
+
+    def _split_by_location(self, file_ids: List[int], files: List[Dict[str, Any]],
+                           sub_name: str, ym: str, threshold_km: float) -> List[Dict[str, Any]]:
+        """Split a month cluster by GPS location if photos span > threshold_km.
+        Returns list of subbucket dicts. If no GPS diversity, returns single bucket."""
+        gps_groups: Dict[str, List[int]] = {}  # city_name -> [file_ids]
+        no_gps: List[int] = []
+
+        for fid in file_ids:
+            if fid >= len(files):
+                continue
+            gps = self._parse_photo_gps(files[fid])
+            if gps:
+                city = self._nearest_city(gps[0], gps[1])
+                if city:
+                    gps_groups.setdefault(city, []).append(fid)
+                else:
+                    # GPS but unknown city — group by coarse grid
+                    grid_key = f"{gps[0]:.1f},{gps[1]:.1f}"
+                    gps_groups.setdefault(grid_key, []).append(fid)
+            else:
+                no_gps.append(fid)
+
+        # Check if there's meaningful GPS diversity
+        if len(gps_groups) < 2:
+            # Single or no location — just return the month cluster as-is
+            return [{"subcategory": f"{sub_name} {ym}" if sub_name else ym, "files": file_ids}]
+
+        # Multiple locations — split!
+        result = []
+        for city in sorted(gps_groups.keys()):
+            result.append({
+                "subcategory": f"{sub_name} {ym} {city}" if sub_name else f"{ym} {city}",
+                "files": gps_groups[city],
+            })
+        # Attach no-GPS files to the first cluster (or a separate bucket if large)
+        if no_gps:
+            if len(no_gps) > 10:
+                result.append({
+                    "subcategory": f"{sub_name} {ym} (no GPS)" if sub_name else f"{ym} (no GPS)",
+                    "files": no_gps,
+                })
+            else:
+                # Merge into first cluster
+                result[0]["files"].extend(no_gps)
+        return result
 
     @staticmethod
     def _summarize_tree(tree: List[Dict[str, Any]]) -> str:
