@@ -287,15 +287,18 @@ class LLMManager:
             folder_idx += 1
         folder_manifest = "\n".join(folder_lines)
 
-        # Step 3: Also build root file manifest
+        # Step 3: Also build root file manifest — include text content for content-based categorization
+        # This is critical for Desktop/Downloads scans where files have no folder structure
         root_lines = []
         root_id_map = {}
         for ri, f in enumerate(root_files):
             fid = f.get("id", 0)
             name = self._sanitize(f.get("filename", ""))
-            text = extract_text(f.get("path", ""), max_chars=120) if f.get("path") else ""
-            text_str = text[:120] if text else "(no text)"
-            root_lines.append(f"{folder_idx + ri}: {name} | {text_str}")
+            text = extract_text(f.get("path", ""), max_chars=200) if f.get("path") else ""
+            exif = format_exif_compact(f.get("exif", {})) if f.get("exif") else ""
+            exif_str = f" [EXIF: {exif}]" if exif else ""
+            text_str = text[:200] if text else f"(no text content, file type: .{name.rsplit('.', 1)[-1].lower() if '.' in name else 'unknown'})"
+            root_lines.append(f"{folder_idx + ri}: {name}{exif_str} | {text_str}")
             root_id_map[folder_idx + ri] = fid
         root_manifest = "\n".join(root_lines)
 
@@ -309,6 +312,8 @@ Folder rules (look at the folder NAME and sample filenames, not the file extensi
 - Person name folders (Eleanor, Sarah, John) → Photos
 - Business/legal/company folders (Cryocare, Mamillon, Incorporation, CIMC, ISO) → Law
 - Folders with "services", "documents", "expenses", "archives", "OSL" → Law (business documents)
+- Folders inside a business folder (e.g. "Cryocare services/CIMC documents/internal ISO #1") → Law
+- Folders with "internal", "ISO", "CICU", "design", "certificate" → Law (compliance/inspection documents)
 - Video folders (Standard Work Videos) → Media
 - Folders with crypto/wallet/blockchain names → Finance
 - Use "Uncategorized" only if you truly cannot tell
@@ -368,15 +373,28 @@ Now categorize all {total_items} items:
                     subcat = f.get("_subcat", "")
                 elif f"__root_{fid}" in folder_categories:
                     cat = folder_categories[f"__root_{fid}"]
-                    # For root files, derive subcategory from filename
+                    # For root files (Desktop/Downloads scans), derive subcategory from filename/content
                     fname = f.get("filename", "")
-                    if "wallet" in fname.lower() or "crypto" in fname.lower():
+                    fname_lower = fname.lower()
+                    if "wallet" in fname_lower or "crypto" in fname_lower or "curecoin" in fname_lower:
                         subcat = "Cryptocurrency"
-                        # Override category if LLM said Uncategorized — it's clearly Finance
                         if cat == "Uncategorized":
                             cat = "Finance"
                     elif "UTC--" in fname:
                         subcat = "Timestamp"
+                        if cat == "Uncategorized":
+                            cat = "Finance"
+                    elif "mon compte" in fname_lower or "compte" in fname_lower:
+                        subcat = "Banking"
+                        if cat == "Uncategorized":
+                            cat = "Finance"
+                    elif "atom address" in fname_lower:
+                        subcat = "Cryptocurrency"
+                        if cat == "Uncategorized":
+                            cat = "Finance"
+                    elif fname.startswith("~$"):
+                        # Office temp file — same category as parent file
+                        subcat = ""
                     else:
                         subcat = ""
                 else:
