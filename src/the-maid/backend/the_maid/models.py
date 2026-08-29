@@ -203,6 +203,9 @@ class LLMManager:
             # Final tree is the accumulated tree (already merged incrementally)
             tree = accumulated_tree if len(sub_trees) > 1 else sub_trees[0]
 
+        # Photo sub-clustering: split large photo folders by year/month
+        tree = self._subcluster_photos(tree, indexed)
+
         # Review agent — LLM fixes fallback buckets
         reviewed_tree = self._review_agent(tree, indexed)
 
@@ -390,6 +393,96 @@ Now categorize all {total_items} items:
 
         # Fallback to extension rules
         return self._fallback_tree(files).get("tree", [])
+
+    @staticmethod
+    def _parse_photo_date(f: Dict[str, Any]) -> Optional[str]:
+        """Extract YYYY-MM from EXIF datetime or filename pattern.
+        Handles: 20230506_042311916_iOS.heic, IMG_20240615_081742.jpg, EXIF datetime."""
+        # Try EXIF first
+        exif = f.get("exif", {})
+        if exif and exif.get("datetime_original"):
+            dt = exif["datetime_original"]
+            if len(dt) >= 7:
+                return dt[:7].replace(":", "-")
+        # Try filename: 20230506_042311916_iOS -> 2023-05
+        fname = f.get("filename", "")
+        m = re.search(r'(\d{4})(\d{2})(\d{2})', fname)
+        if m:
+            return f"{m.group(1)}-{m.group(2)}"
+        return None
+
+    @staticmethod
+    def _parse_photo_year(f: Dict[str, Any]) -> Optional[str]:
+        """Extract YYYY from EXIF or filename."""
+        ym = LLMManager._parse_photo_date(f)
+        return ym[:4] if ym else None
+
+    def _subcluster_photos(self, tree: List[Dict[str, Any]], files: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+        """Post-process: split large photo subcategories by year/month.
+        Only applies to Photos category subbuckets with > 50 files.
+        Uses EXIF datetime or filename date patterns (20230506_...) for clustering."""
+        PHOTO_SUBCLUSTER_THRESHOLD = 50
+        MONTH_SPLIT_THRESHOLD = 20
+
+        for node in tree:
+            if node.get("category") != "Photos":
+                continue
+            new_subbuckets = []
+            for sub in node.get("subbuckets", []):
+                file_ids = sub.get("files", [])
+                sub_name = sub.get("subcategory", "")
+                if len(file_ids) <= PHOTO_SUBCLUSTER_THRESHOLD:
+                    new_subbuckets.append(sub)
+                    continue
+
+                # Large photo subbucket -- split by date
+                dated: Dict[str, List[int]] = {}
+                undated: List[int] = []
+                for fid in file_ids:
+                    if fid >= len(files):
+                        continue
+                    year = self._parse_photo_year(files[fid])
+                    if year:
+                        dated.setdefault(year, []).append(fid)
+                    else:
+                        undated.append(fid)
+
+                if not dated:
+                    new_subbuckets.append(sub)
+                    continue
+
+                # Split by year, then by month if year is big enough
+                for year in sorted(dated.keys()):
+                    year_ids = dated[year]
+                    if len(year_ids) <= MONTH_SPLIT_THRESHOLD:
+                        new_subbuckets.append({
+                            "subcategory": f"{sub_name} {year}" if sub_name else year,
+                            "files": year_ids,
+                        })
+                    else:
+                        month_groups: Dict[str, List[int]] = {}
+                        for fid in year_ids:
+                            ym = self._parse_photo_date(files[fid])
+                            if ym:
+                                month_groups.setdefault(ym, []).append(fid)
+                            else:
+                                month_groups.setdefault(f"{year}-unknown", []).append(fid)
+                        for ym in sorted(month_groups.keys()):
+                            new_subbuckets.append({
+                                "subcategory": f"{sub_name} {ym}" if sub_name else ym,
+                                "files": month_groups[ym],
+                            })
+
+                # Attach undated files
+                if undated:
+                    new_subbuckets.append({
+                        "subcategory": f"{sub_name} (undated)" if sub_name else "undated",
+                        "files": undated,
+                    })
+
+            node["subbuckets"] = new_subbuckets
+            node["count"] = sum(len(s.get("files", [])) for s in new_subbuckets)
+        return tree
 
     @staticmethod
     def _summarize_tree(tree: List[Dict[str, Any]]) -> str:
