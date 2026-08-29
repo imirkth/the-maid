@@ -124,6 +124,21 @@ class FileMove(BaseModel):
     target_category: str
     target_subcategory: str = ""
 
+class SubcategoryEdit(BaseModel):
+    category_name: str
+    old_subname: str
+    new_subname: Optional[str] = None
+    delete: bool = False
+
+class MergeCategoriesRequest(BaseModel):
+    source_name: str
+    target_name: str
+
+class BulkMoveRequest(BaseModel):
+    file_ids: List[str] = []
+    target_category: str
+    target_subcategory: str = ""
+
 
 # --- Endpoints ---
 
@@ -610,3 +625,108 @@ async def execute_moves(approved_file_ids: List[str]):
                     except Exception as e:
                         results.append({"file_id": fid, "status": "error", "detail": str(e)})
     return {"results": results}
+
+
+@app.put("/tree/subcategory")
+async def edit_subcategory(edit: SubcategoryEdit):
+    """Rename or delete a subcategory within a category.
+    Delete moves files to parent category (as direct children)."""
+    data = _load_tree()
+    tree = data.get("tree", [])
+    for cat in tree:
+        if cat.get("name") != edit.category_name:
+            continue
+        children = cat.get("children", [])
+        if edit.delete:
+            # Move files from subcategory to parent category as direct children
+            new_children = []
+            for child in children:
+                if child.get("name") == edit.old_subname and child.get("files"):
+                    # Promote files to direct children of category
+                    for f in child["files"]:
+                        new_children.append(f)
+                else:
+                    new_children.append(child)
+            cat["children"] = new_children
+        elif edit.new_subname:
+            for child in children:
+                if child.get("name") == edit.old_subname and child.get("files"):
+                    child["name"] = edit.new_subname
+                    break
+        break
+    data["tree"] = tree
+    _save_tree(data)
+    return {"status": "ok", "tree": tree}
+
+
+@app.put("/tree/merge-categories")
+async def merge_categories_endpoint(req: MergeCategoriesRequest):
+    """Merge source category into target. Moves all children to target, removes source."""
+    data = _load_tree()
+    tree = data.get("tree", [])
+    source_cat = None
+    target_cat = None
+    for cat in tree:
+        if cat.get("name") == req.source_name:
+            source_cat = cat
+        if cat.get("name") == req.target_name:
+            target_cat = cat
+    if not source_cat:
+        raise HTTPException(status_code=404, detail=f"Source category '{req.source_name}' not found")
+    if not target_cat:
+        raise HTTPException(status_code=404, detail=f"Target category '{req.target_name}' not found")
+    if source_cat is target_cat:
+        raise HTTPException(status_code=400, detail="Cannot merge category into itself")
+    # Move all children from source to target
+    for child in source_cat.get("children", []):
+        target_cat["children"].append(child)
+    # Remove source from tree
+    tree = [c for c in tree if c.get("name") != req.source_name]
+    data["tree"] = tree
+    _save_tree(data)
+    return {"status": "ok", "tree": tree}
+
+
+@app.put("/tree/bulk-move")
+async def bulk_move_files(req: BulkMoveRequest):
+    """Move multiple files to a target category/subcategory at once."""
+    data = _load_tree()
+    tree = data.get("tree", [])
+    # Collect and remove all target files from their current locations
+    found_files = []
+    for cat in tree:
+        for i, child in enumerate(cat.get("children", [])):
+            if child.get("files"):
+                remaining = []
+                for f in child["files"]:
+                    if f.get("file_id") in req.file_ids:
+                        found_files.append(f)
+                    else:
+                        remaining.append(f)
+                child["files"] = remaining
+            elif child.get("file_id") in req.file_ids:
+                found_files.append(cat["children"].pop(i))
+    # Find or create target category
+    target_cat = None
+    for cat in tree:
+        if cat.get("name") == req.target_category:
+            target_cat = cat
+            break
+    if not target_cat:
+        target_cat = {"name": req.target_category, "children": []}
+        tree.append(target_cat)
+    if req.target_subcategory:
+        target_sub = None
+        for child in target_cat["children"]:
+            if child.get("name") == req.target_subcategory and child.get("files"):
+                target_sub = child
+                break
+        if not target_sub:
+            target_sub = {"name": req.target_subcategory, "files": []}
+            target_cat["children"].append(target_sub)
+        target_sub["files"].extend(found_files)
+    else:
+        target_cat["children"].extend(found_files)
+    data["tree"] = tree
+    _save_tree(data)
+    return {"status": "ok", "tree": tree, "moved": len(found_files)}

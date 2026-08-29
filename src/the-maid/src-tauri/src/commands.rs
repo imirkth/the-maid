@@ -551,6 +551,72 @@ pub async fn execute_tree_moves(approved_file_ids: Vec<String>) -> Result<serde_
     resp.json().await.map_err(|e| format!("Failed to parse response: {}", e))
 }
 
+#[tauri::command]
+pub async fn edit_subcategory(category_name: String, old_subname: String, new_subname: Option<String>, delete: bool) -> Result<serde_json::Value, String> {
+    let client = reqwest::Client::builder()
+        .timeout(std::time::Duration::from_secs(10))
+        .build()
+        .map_err(|e| format!("HTTP client error: {}", e))?;
+    let body = serde_json::json!({
+        "category_name": category_name,
+        "old_subname": old_subname,
+        "new_subname": new_subname,
+        "delete": delete,
+    });
+    let resp = client
+        .put("http://127.0.0.1:9473/tree/subcategory")
+        .json(&body)
+        .send().await
+        .map_err(|e| format!("Failed to reach Python backend: {}", e))?;
+    if !resp.status().is_success() {
+        return Err(format!("Python backend error: {}", resp.status()));
+    }
+    resp.json().await.map_err(|e| format!("Failed to parse response: {}", e))
+}
+
+#[tauri::command]
+pub async fn merge_categories(source_name: String, target_name: String) -> Result<serde_json::Value, String> {
+    let client = reqwest::Client::builder()
+        .timeout(std::time::Duration::from_secs(10))
+        .build()
+        .map_err(|e| format!("HTTP client error: {}", e))?;
+    let body = serde_json::json!({
+        "source_name": source_name,
+        "target_name": target_name,
+    });
+    let resp = client
+        .put("http://127.0.0.1:9473/tree/merge-categories")
+        .json(&body)
+        .send().await
+        .map_err(|e| format!("Failed to reach Python backend: {}", e))?;
+    if !resp.status().is_success() {
+        return Err(format!("Python backend error: {}", resp.status()));
+    }
+    resp.json().await.map_err(|e| format!("Failed to parse response: {}", e))
+}
+
+#[tauri::command]
+pub async fn bulk_move_files(file_ids: Vec<String>, target_category: String, target_subcategory: String) -> Result<serde_json::Value, String> {
+    let client = reqwest::Client::builder()
+        .timeout(std::time::Duration::from_secs(10))
+        .build()
+        .map_err(|e| format!("HTTP client error: {}", e))?;
+    let body = serde_json::json!({
+        "file_ids": file_ids,
+        "target_category": target_category,
+        "target_subcategory": target_subcategory,
+    });
+    let resp = client
+        .put("http://127.0.0.1:9473/tree/bulk-move")
+        .json(&body)
+        .send().await
+        .map_err(|e| format!("Failed to reach Python backend: {}", e))?;
+    if !resp.status().is_success() {
+        return Err(format!("Python backend error: {}", resp.status()));
+    }
+    resp.json().await.map_err(|e| format!("Failed to parse response: {}", e))
+}
+
 #[derive(Serialize, Deserialize, Debug, Clone)]
 pub struct CleanupItemCmd {
     pub file_id: String,
