@@ -56,6 +56,7 @@ class ScanRequest(BaseModel):
 
 class CategorizeRequest(BaseModel):
     files: List[dict] = Field(default_factory=list)
+    directory: str = Field(default="", description="Scan root directory for relative path computation")
 
 class FileProposal(BaseModel):
     file_id: str
@@ -179,7 +180,7 @@ async def categorize_files(request: CategorizeRequest):
 
     # Run the two-tier pipeline
     _cat_start = _time.monotonic()
-    result = llm.categorize_all(files, _sandbox_folders())
+    result = llm.categorize_all(files, _sandbox_folders(), scan_root=request.directory)
     _cat_elapsed = _time.monotonic() - _cat_start
 
     # Emit completion

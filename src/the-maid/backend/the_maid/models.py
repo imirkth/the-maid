@@ -132,6 +132,7 @@ class LLMManager:
         self,
         files: List[Dict[str, Any]],
         sandbox_folders: Optional[list[str]] = None,
+        scan_root: str = "",
     ) -> Dict[str, Any]:
         """
         Three-tier categorization pipeline with hierarchical categories and persistent registry.
@@ -168,7 +169,7 @@ class LLMManager:
         accumulated_tree: List[Dict[str, Any]] = []
 
         if len(indexed) <= MAX_FILES_PER_SUBAGENT:
-            tree = self._classify_batch(indexed, accumulated_tree)
+            tree = self._classify_batch(indexed, accumulated_tree, scan_root)
         else:
             # Chunk by MAX_FILES_PER_SUBAGENT, then merge
             sub_trees = []
@@ -177,7 +178,7 @@ class LLMManager:
             _batch_start = _time.monotonic()
             for chunk_idx, chunk_start in enumerate(range(0, len(indexed), MAX_FILES_PER_SUBAGENT)):
                 chunk = indexed[chunk_start:chunk_start + MAX_FILES_PER_SUBAGENT]
-                tree = self._classify_batch(chunk, accumulated_tree)
+                tree = self._classify_batch(chunk, accumulated_tree, scan_root)
                 sub_trees.append(tree)
                 # Grow the accumulated tree for the next batch
                 accumulated_tree = self._merge_into_accumulated(accumulated_tree, tree)
@@ -211,7 +212,7 @@ class LLMManager:
 
         return {"tree": reviewed_tree}
 
-    def _classify_batch(self, files: List[Dict[str, Any]], accumulated_tree: Optional[List[Dict[str, Any]]] = None) -> List[Dict[str, Any]]:
+    def _classify_batch(self, files: List[Dict[str, Any]], accumulated_tree: Optional[List[Dict[str, Any]]] = None, scan_root: str = "") -> List[Dict[str, Any]]:
         """
         Classify a batch of files in a single LLM call.
         The manifest includes folder context so the LLM sees the full directory hierarchy.
@@ -222,7 +223,7 @@ class LLMManager:
         if not files:
             return []
 
-        manifest = self._build_manifest(files)
+        manifest = self._build_manifest(files, scan_root)
         file_count = len(files)
 
         # Build registry hint from persistent memory
@@ -417,7 +418,7 @@ Output one line per file: "id: Category > Subcategory" (or "id: Category" if no 
         tree.sort(key=lambda n: sum(len(s.get("files", [])) for s in n.get("subbuckets", [])), reverse=True)
         return tree
 
-    def _build_manifest(self, files: List[Dict[str, Any]]) -> str:
+    def _build_manifest(self, files: List[Dict[str, Any]], scan_root: str = "") -> str:
         """Build a compact text manifest of files for the LLM prompt.
         Includes the FULL relative path from scan root — folder structure is critical
         categorization signal. Files in the same project folder should stay together.
@@ -430,7 +431,7 @@ Output one line per file: "id: Category > Subcategory" (or "id: Category" if no 
             path = f.get("path", "")
             # Use the full relative path (not just parent folder name)
             # so the LLM can see project groupings and existing organization
-            rel_path = self._relative_path_hint(path)
+            rel_path = self._relative_path_hint(path, scan_root)
             content = extract_text(path, max_chars=CONTENT_PREVIEW_CHARS) if path else ""
 
             # Build enrichment blocks for EXIF and faces
@@ -468,33 +469,41 @@ Output one line per file: "id: Category > Subcategory" (or "id: Category" if no 
             return f"[FACES: {count} ({', '.join(labels)})]"
         return f"[FACES: {count}]"
 
-    def _relative_path_hint(self, path: str) -> str:
+    def _relative_path_hint(self, path: str, scan_root: str = "") -> str:
         """Extract a meaningful relative path from the full path.
-        Trims the scan root prefix and common home dirs to show the folder hierarchy
-        that the user created — this IS categorization signal.
-        e.g. /home/user/Downloads/Crypto Projects/btc_analysis.xlsx -> 'Crypto Projects'
-             /home/user/Documents/Work/Projects/the-maid/Cargo.toml -> 'Work/Projects/the-maid'
+        Trims the scan root prefix to show the folder hierarchy the user created.
+        Uses scan_root when provided (handles /media/... and any mount path).
+        Falls back to heuristic trimming for home dirs and standard scan roots.
+        e.g. /media/UUID/bakc up HD/Cryocare services/contract.pdf, root=/media/UUID/bakc up HD
+             -> 'Cryocare services'
         """
         if not path:
             return ""
+
+        # Primary path: strip scan_root prefix directly (handles /media/..., external drives, etc.)
+        if scan_root:
+            root = str(Path(scan_root).resolve())
+            p = str(Path(path).resolve())
+            if p.startswith(root + "/"):
+                rel = p[len(root) + 1:]  # e.g. "Cryocare services/contract.pdf"
+                # Return everything except the filename
+                parts = rel.split("/")
+                return "/".join(parts[:-1]) if len(parts) > 1 else ""
+
+        # Fallback: heuristic trimming for home dirs and standard scan roots
         p = Path(path)
-        # Try to trim common prefixes: home dir, Downloads, Desktop, Documents, Pictures
         parts = p.parts
-        # Find the first meaningful segment after home/root
         trim_prefixes = {"home", "Users", "root", "tmp"}
         start = 0
         for i, part in enumerate(parts):
             if part in trim_prefixes:
                 start = i + 2  # skip /home/user
                 break
-        # Also trim common scan roots
         scan_roots = {"Downloads", "Desktop", "Documents", "Pictures", "Videos", "Music"}
-        # If we see a scan root, start after it
-        for i in range(start, len(parts) - 1):  # -1 to skip filename
+        for i in range(start, len(parts) - 1):
             if parts[i] in scan_roots:
                 start = i + 1
                 break
-        # Build relative path from meaningful segments (exclude filename)
         rel_parts = parts[start:-1] if start < len(parts) - 1 else []
         return "/".join(rel_parts) if rel_parts else ""
 
