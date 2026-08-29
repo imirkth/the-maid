@@ -226,10 +226,10 @@ class LLMManager:
         manifest = self._build_manifest(files, scan_root)
         file_count = len(files)
 
-        # Build registry hint from persistent memory
-        registry_hint = self._registry.build_hint()
-        if registry_hint:
-            registry_hint = f"\n{registry_hint}\nReuse these categories when appropriate. Add new ones only if a file doesn't fit any existing category.\n"
+        # Registry hint disabled — it accumulates garbage from broken runs and poisons
+        # the prompt for small models (6KB of noise made Gemma 4 E2B give up entirely).
+        # TODO: re-enable with sanitization once we filter out path-like / garbage entries.
+        registry_hint = ""
 
         # Build accumulated tree hint from previous batches
         tree_hint = ""
@@ -238,91 +238,155 @@ class LLMManager:
             if tree_summary:
                 tree_hint = f"\nCATEGORIES FROM PREVIOUS BATCHES (reuse these for consistency — do not create duplicate categories for the same topic):\n{tree_summary}\n"
 
-        prompt = f"""You are a file organizer. Your job is to PROPOSE a better folder structure for the user's files.
-The user already has these files in folders. The existing folder structure is their current organization.
-Your proposed structure must be BETTER than what they have now — never worse, never more generic.
+        # Ultra-simple prompt tuned for small models (Gemma 4 E2B / 5B params).
+        # Long prompts confuse small models — they echo paths instead of outputting categories.
+        # Keep it short, explicit, and impossible to get wrong.
+        prev_cats = tree_hint + registry_hint
 
-CORE PRINCIPLE: The existing folder structure is the strongest signal of user intent. Respect it.
-A file already in "Eleanor/" is there because the user put it there. Moving it to "Pictures" is a DOWNGRADE.
-Only change a file's category when you can genuinely improve its organization.
+        # ── Folder-first categorization ──
+        # With only ~13 unique folders, pre-compute category per folder, not per file.
+        # The LLM only picks categories for folders + root files (maybe 20 items total).
+        # This avoids the 5B model's fatal flaw: seeing .jpg → Photos even in business folders.
+        #
+        # Step 1: Group files by folder key
+        folder_groups: Dict[str, List[Dict[str, Any]]] = {}
+        root_files: List[Dict[str, Any]] = []
+        for f in files:
+            path = f.get("path", "")
+            rel = path.replace(scan_root + "/", "") if scan_root else path
+            parts = [p for p in rel.split("/") if p]
+            if len(parts) > 1:
+                folder_key = "/".join(parts[:-1])
+                f["_subcat"] = parts[-2]  # last folder segment
+                folder_groups.setdefault(folder_key, []).append(f)
+            else:
+                f["_subcat"] = ""
+                root_files.append(f)
 
-WHEN TO KEEP THE EXISTING STRUCTURE:
-- The folder name is specific and meaningful (person names, project names, place names, event names).
-  e.g. "Eleanor/", "Bali 2022/", "the-maid/", "Cryocare Services/" → keep as-is, just map to a sensible top-level category.
-- Files in the same folder should stay together in the same category/subcategory.
-- A folder like "photo 2022/" is fine but could be improved to "2022/Bali" if EXIF GPS confirms the location.
+        # Step 2: Build folder manifest for LLM — one line per FOLDER, not per file
+        folder_lines = []
+        folder_idx = 0
+        folder_id_map = {}  # llm_id -> folder_key
+        for folder_key, folder_files in sorted(folder_groups.items(), key=lambda x: -len(x[1])):
+            sample_file = folder_files[0]
+            sample_path = sample_file.get("path", "").replace(scan_root + "/", "") if scan_root else sample_file.get("path", "")
+            exts = set()
+            for ff in folder_files:
+                p = ff.get("path", "")
+                if "." in p:
+                    exts.add(p.rsplit(".", 1)[-1].lower())
+            ext_str = ", ".join(sorted(exts)[:5])
+            # Show up to 3 sample filenames so LLM can understand what the folder contains
+            sample_names = [ff.get("path", "").split("/")[-1][:40] for ff in folder_files[:3]]
+            samples_str = "; ".join(sample_names)
+            folder_lines.append(f"{folder_idx}: {folder_key} ({len(folder_files)} files, types: {ext_str}) samples: {samples_str}")
+            folder_id_map[folder_idx] = folder_key
+            folder_idx += 1
+        folder_manifest = "\n".join(folder_lines)
 
-WHEN TO IMPROVE:
-- Generic folder names that could be more specific: "photo 2022" → "Travel > 2022 Bali" (if EXIF shows Bali GPS).
-- Folder names that are unclear or inconsistent: "stuff", "misc", "new folder (3)" → replace with meaningful categories.
-- Files loose in the root with no folder structure → categorize from content/EXIF/filename.
-- A folder mixing unrelated files → split into appropriate categories.
+        # Step 3: Also build root file manifest
+        root_lines = []
+        root_id_map = {}
+        for ri, f in enumerate(root_files):
+            fid = f.get("id", 0)
+            name = self._sanitize(f.get("filename", ""))
+            text = extract_text(f.get("path", ""), max_chars=120) if f.get("path") else ""
+            text_str = text[:120] if text else "(no text)"
+            root_lines.append(f"{folder_idx + ri}: {name} | {text_str}")
+            root_id_map[folder_idx + ri] = fid
+        root_manifest = "\n".join(root_lines)
 
-HIERARCHY RULES:
-- Top-level categories are BROAD subjects: Finance, Law, Work, Personal, Software, Travel, Recipes, Health, Education, Engineering, Game Development, Photos, etc.
-- Subcategories are SPECIFIC: Finance > Cryptocurrency, Travel > 2022 Bali, Photos > Eleanor, Work > Meeting Notes.
-- Person names (Eleanor, Sarah, Tom) are subcategories under Photos or Personal, NOT top-level categories.
-- When a folder is already named after a person or place, use that name as the subcategory.
-  e.g. "Eleanor/IMG_1234.jpg" → Photos > Eleanor (NOT "Pictures", NOT "Personal > Family Events").
+        # Step 4: Ask LLM to categorize FOLDERS (not files) + root files
+        total_items = folder_idx + len(root_files)
+        prompt = f"""Pick a category for each folder or file below.
 
-EXIF AND FACE DATA:
-- [EXIF: ...] gives camera model, date taken, GPS coordinates, resolution.
-- [FACES: N (labels)] gives face count and cluster labels (may be "Unknown_Person_N" if not yet named).
-- Use GPS for travel/location categorization. Use camera+date for event detection.
-- Face labels help identify people in photos — if a folder is named after a person and faces are detected, the folder name is likely the person's name.
-- Unknown_Person_N labels mean the face was detected but not yet named. Don't treat them as meaningful names.
+Categories: Photos, Finance, Law, Work, Software, Travel, Personal, Education, Health, Media, Documents, Uncategorized
 
-NEVER use file types like "pdf", "document", "code" as categories — use what the file is ABOUT.
-Only use "Screenshots" for image files with no meaningful content (just a screen grab with no EXIF, no faces, no context).
-Only use "Uncategorized" as a last resort when you truly cannot tell what the file is about.
+Folder rules (look at the folder NAME and sample filenames, not the file extensions):
+- Person name folders (Eleanor, Sarah, John) → Photos
+- Business/legal/company folders (Cryocare, Mamillon, Incorporation, CIMC, ISO) → Law
+- Folders with "services", "documents", "expenses", "archives", "OSL" → Law (business documents)
+- Video folders (Standard Work Videos) → Media
+- Folders with crypto/wallet/blockchain names → Finance
+- Use "Uncategorized" only if you truly cannot tell
 
-Format: "id: Category > Subcategory" (or just "id: Category" if no subcategory fits).
+Folders:
+{folder_manifest}
 
-Example (existing folder is specific — KEEP IT, just add top-level):
-0: Eleanor/IMG_2024_001.jpg | [EXIF: Xiaomi Redmi K40, 2024-06-15, 4624x3472] [FACES: 1 (Unknown_Person_1)] | (no text content, file type: .jpg)
-0: Photos > Eleanor
-1: Bali 2022/IMG_2022_774.jpg | [EXIF: iPhone 13, 2022-07-14, GPS: -8.34°S 115.09°E, 4032x3024] | (no text content, file type: .jpg)
-1: Travel > Bali 2022
-2: the-maid/main.rs | (no text content, file type: .rs)
-2: Game Development > The Maid
-3: Cryocare Services/contract_law_lecture_3.pdf | (no text content, file type: .pdf)
-3: Law > Cryocare Services
+Root files (no folder):
+{root_manifest}
+{prev_cats}
+Output: N: Category (one per line)
 
-Example (existing folder is generic — IMPROVE IT):
-4: photo 2022/IMG_2022_774.jpg | [EXIF: iPhone 13, 2022-07-14, GPS: -8.34°S 115.09°E, 4032x3024] | (no text content, file type: .jpg)
-4: Travel > Bali 2022
-5: misc/report.pdf | Q2 revenue review, action items for sales team
-5: Work > Meeting Notes
-6: stuff/obsidian_setup.md | Obsidian vault configuration, plugins, daily notes setup
-6: Software > Obsidian
+0: Photos
+1: Law
 
-Example (loose files with no folder — categorize from content):
-7: Contract Law Lecture 3.pdf | Consideration in contract law requires a bargained-for exchange
-7: Law > Contract
-8: btc_price.xlsx | BTC-USD price data, moving averages, RSI indicators
-8: Finance > Cryptocurrency
-9: Gemini_Generated_Image.png | (no text content, file type: .png)
-9: AI Art
-10: screenshot_2024_03_15.png | (no text content, file type: .png)
-10: Screenshots
-{tree_hint}{registry_hint}
-Now categorize these {file_count} files:
-{manifest}
-
-Output one line per file: "id: Category > Subcategory" (or "id: Category" if no subcategory)
+Now categorize all {total_items} items:
 """
 
         try:
             text = self._chat_complete(
                 [{"role": "user", "content": prompt}],
-                max_tokens=max(512, file_count * 20),
+                max_tokens=max(512, total_items * 10),
                 temperature=0.3,
             )
-            assignments = self._parse_hierarchical_lines(text, files)
+
+            # Parse the folder-level categories
+            folder_categories = {}  # folder_key -> category
+            for line in text.strip().split("\n"):
+                m = re.match(r'^(\d+)\s*:\s*(.+)', line.strip())
+                if not m:
+                    continue
+                item_id = int(m.group(1))
+                cat = m.group(2).strip().strip('*`"\'')
+                # Reject garbage
+                if len(cat) > 50 or '/' in cat or '|' in cat:
+                    continue
+                if item_id in folder_id_map:
+                    folder_key = folder_id_map[item_id]
+                    folder_categories[folder_key] = cat
+                elif item_id in root_id_map:
+                    fid = root_id_map[item_id]
+                    folder_categories[f"__root_{fid}"] = cat
+
+            # Step 5: Build assignments from folder categories
+            assignments = []
+            for f in files:
+                fid = f.get("id", 0)
+                folder_key = None
+                path = f.get("path", "")
+                rel = path.replace(scan_root + "/", "") if scan_root else path
+                parts = [p for p in rel.split("/") if p]
+                if len(parts) > 1:
+                    folder_key = "/".join(parts[:-1])
+
+                if folder_key and folder_key in folder_categories:
+                    cat = folder_categories[folder_key]
+                    subcat = f.get("_subcat", "")
+                elif f"__root_{fid}" in folder_categories:
+                    cat = folder_categories[f"__root_{fid}"]
+                    # For root files, derive subcategory from filename
+                    fname = f.get("filename", "")
+                    if "wallet" in fname.lower() or "crypto" in fname.lower():
+                        subcat = "Cryptocurrency"
+                        # Override category if LLM said Uncategorized — it's clearly Finance
+                        if cat == "Uncategorized":
+                            cat = "Finance"
+                    elif "UTC--" in fname:
+                        subcat = "Timestamp"
+                    else:
+                        subcat = ""
+                else:
+                    cat = "Uncategorized"
+                    subcat = f.get("_subcat", "")
+
+                assignments.append((fid, cat, subcat))
+
             if assignments:
                 return self._build_tree_from_assignments(assignments)
         except Exception as e:
             print(f"[LLM] Classification error: {e}")
+            import traceback; traceback.print_exc()
 
         # Fallback to extension rules
         return self._fallback_tree(files).get("tree", [])
@@ -397,10 +461,28 @@ Output one line per file: "id: Category > Subcategory" (or "id: Category" if no 
         return accumulated
 
     def _build_tree_from_assignments(self, assignments: List[Tuple[int, str, str]]) -> List[Dict[str, Any]]:
-        """Build a hierarchical tree from (file_id, category, subcategory) assignments."""
+        """Build a hierarchical tree from (file_id, category, subcategory) assignments.
+        Post-processes subcategories: strips full paths to last folder name,
+        removes file extensions used as subcategories."""
+        # Clean up subcategories
+        cleaned = []
+        for fid, cat, subcat in assignments:
+            # Strip full nested paths in subcategory: "Cryocare services/CIMC documents/internal ISO #1"
+            # → just "internal ISO #1" (last folder segment)
+            if '/' in subcat:
+                parts = [p.strip() for p in subcat.split('/') if p.strip()]
+                if parts:
+                    subcat = parts[-1]
+            # Remove file extensions used as subcategory
+            if subcat and re.match(r'^\.[a-z0-9]{1,5}$', subcat, re.IGNORECASE):
+                subcat = ""
+            # Strip leading/trailing punctuation
+            subcat = subcat.strip('*`"\' ')
+            cleaned.append((fid, cat, subcat))
+
         # Group by category → subcategory → file_ids
         by_cat: Dict[str, Dict[str, List[int]]] = {}
-        for fid, cat, subcat in assignments:
+        for fid, cat, subcat in cleaned:
             by_cat.setdefault(cat, {}).setdefault(subcat, []).append(fid)
 
         tree = []
@@ -507,53 +589,145 @@ Output one line per file: "id: Category > Subcategory" (or "id: Category" if no 
         rel_parts = parts[start:-1] if start < len(parts) - 1 else []
         return "/".join(rel_parts) if rel_parts else ""
 
+    @staticmethod
+    def _find_file_by_path_echo(rest: str, files: List[Dict[str, Any]]) -> Optional[int]:
+        """When a small model outputs 'id: path/to/file: category' instead of 'N: category',
+        try to find the file ID by matching the path echo against file paths."""
+        # Take the part before the last colon as the path echo
+        if ':' in rest:
+            path_echo = rest[:rest.rindex(':')].strip()
+        else:
+            path_echo = rest.strip()
+        
+        # Try to match by filename (last segment of the path echo)
+        if '/' in path_echo:
+            filename = path_echo.split('/')[-1].strip()
+        else:
+            filename = path_echo.strip()
+        
+        if not filename or len(filename) < 2:
+            return None
+        
+        # Find the file whose path ends with this filename
+        for f in files:
+            fpath = f.get("path", "")
+            fname = f.get("filename", "")
+            if fpath and fpath.endswith(filename):
+                return f.get("id")
+            if fname == filename:
+                return f.get("id")
+        return None
+
     def _parse_hierarchical_lines(self, text: str, files: List[Dict[str, Any]]) -> List[Tuple[int, str, str]]:
         """Parse 'id: Category > Subcategory' lines from LLM output.
 
         Returns list of (file_id, category, subcategory) tuples.
         Subcategory is "" if the model only output a top-level category.
 
-        Handles pipe-delimited echoing where the model outputs:
-            "0: filename | content | Category > Subcategory"
-        by taking the last pipe-separated segment as the category hierarchy.
+        Handles several LLM output formats:
+        - "0: Category > Subcategory" (ideal)
+        - "0: filename | content | Category > Subcategory" (pipe echo)
+        - "id: path/to/file: Category > Subcategory" (colon echo, common with small models)
+        - "id: path/to/file: folder/path" (path echo, no > separator)
         """
         assignments = []
         valid_ids = {f.get("id", 0) for f in files}
         for line in text.strip().split("\n"):
-            match = re.match(r'^(\d+)\s*:\s*(.+)', line.strip())
-            if match:
-                fid = int(match.group(1))
-                rest = match.group(2).strip()
-                # Model may echo manifest pipe format: "filename | content | Category > Sub"
-                if '|' in rest:
-                    rest = rest.split('|')[-1].strip()
-                # Strip quotes, markdown
-                rest = rest.strip('*`"\'')
-                # Reject garbage: too long, looks like content, or contains path separators
-                if len(rest) > 80:
-                    continue
-                if '/' in rest or '\\' in rest:
-                    continue
-                if 'no text content' in rest.lower() or 'file type:' in rest.lower():
-                    continue
+            line = line.strip()
+            if not line:
+                continue
 
-                # Split on ">" for hierarchy
-                parts = [p.strip() for p in rest.split('>')]
-                parts = [p for p in parts if p]  # remove empty
+            # Try several formats:
+            # "N: Category > Subcategory" (ideal)
+            # "id: N: Category > Subcategory" (redundant id prefix)
+            # "id: path/to/file: folder/path" (path echo with id prefix, no file number)
+            # "N: path/to/file: folder/path" (path echo)
+            # "id: path | content | Category > Sub" (manifest echo)
+            match = re.match(r'^(?:id\s*:\s*)?(\d+)\s*:\s*(.+)', line, re.IGNORECASE)
+            if not match:
+                # Try "id: <something>: <category>" format (no file number, small model echo)
+                # Map it by looking up the filename in the manifest
+                match2 = re.match(r'^id\s*:\s*(.+)', line, re.IGNORECASE)
+                if match2:
+                    rest = match2.group(1).strip()
+                    # Find the file by matching the path/filename in the manifest
+                    fid = self._find_file_by_path_echo(rest, files)
+                    if fid is not None:
+                        # Extract category part after last colon (if any)
+                        if ':' in rest:
+                            cat_part = rest[rest.rindex(':') + 1:].strip()
+                        else:
+                            cat_part = rest
+                        # Convert path to > hierarchy
+                        if '/' in cat_part and '>' not in cat_part:
+                            path_parts = [p.strip() for p in cat_part.split('/') if p.strip()]
+                            if len(path_parts) >= 2:
+                                cat_part = ' > '.join(path_parts[-2:])
+                            elif len(path_parts) == 1:
+                                cat_part = path_parts[0]
+                        if cat_part and fid in valid_ids:
+                            parts = [p.strip() for p in cat_part.split('>') if p.strip()]
+                            if len(parts) == 1:
+                                assignments.append((fid, parts[0], ""))
+                            elif len(parts) >= 2:
+                                assignments.append((fid, parts[0], " > ".join(parts[1:MAX_DEPTH])))
+                continue
 
-                if not parts:
-                    continue
-                if len(parts) == 1:
-                    cat, subcat = parts[0], ""
-                else:
-                    cat = parts[0]
-                    subcat = parts[1] if len(parts) >= 2 else ""
-                    # Allow 3rd level: "Cat > Sub > Sub-sub" → store as cat="Cat", sub="Sub > Sub-sub"
-                    if len(parts) > 2:
-                        subcat = " > ".join(parts[1:MAX_DEPTH])
+            fid = int(match.group(1))
+            rest = match.group(2).strip()
 
-                if fid in valid_ids and cat:
-                    assignments.append((fid, cat, subcat))
+            # Handle pipe echo: "filename | content | Category > Sub"
+            if '|' in rest:
+                rest = rest.split('|')[-1].strip()
+
+            # Handle colon echo: "path/to/file: Category > Sub" or "path: folder/path"
+            # Small models echo the file path before the actual category.
+            if '>' in rest:
+                # Has hierarchy separator — find where the category starts.
+                gt_pos = rest.index('>')
+                before_gt = rest[:gt_pos]
+                if ':' in before_gt:
+                    # "path/to/file: Category > Sub" — take after last colon before >
+                    rest = rest[rest.rindex(':', 0, gt_pos) + 1:].strip()
+            elif ':' in rest[1:]:
+                # No > but has extra colon: "path/to/file: folder/path"
+                rest = rest[rest.rindex(':') + 1:].strip()
+                # Convert path separators to > for hierarchy
+                if '/' in rest:
+                    path_parts = [p.strip() for p in rest.split('/') if p.strip()]
+                    if len(path_parts) >= 2:
+                        rest = ' > '.join(path_parts[-2:])  # last two segments as Cat > Sub
+                    elif len(path_parts) == 1:
+                        rest = path_parts[0]
+
+            # Strip quotes, markdown
+            rest = rest.strip('*`"\'')
+
+            # Reject garbage: too long, looks like content
+            if len(rest) > 100:
+                continue
+            if 'no text content' in rest.lower() or 'file type:' in rest.lower():
+                continue
+            # Reject if it still looks like a file path (has extension at end)
+            if re.search(r'\.\w{1,5}$', rest) and '/' in rest:
+                continue
+
+            # Split on ">" for hierarchy
+            parts = [p.strip() for p in rest.split('>')]
+            parts = [p for p in parts if p]  # remove empty
+
+            if not parts:
+                continue
+            if len(parts) == 1:
+                cat, subcat = parts[0], ""
+            else:
+                cat = parts[0]
+                subcat = parts[1] if len(parts) >= 2 else ""
+                if len(parts) > 2:
+                    subcat = " > ".join(parts[1:MAX_DEPTH])
+
+            if fid in valid_ids and cat:
+                assignments.append((fid, cat, subcat))
         # Ensure all files are assigned
         assigned_ids = {a[0] for a in assignments}
         for f in files:
@@ -719,8 +893,8 @@ Output one line per file: "id: Category > Subcategory" (or "id: Category" if no 
                            if node["category"].lower().strip() not in FALLBACK_CATS])
         cat_list = ", ".join(real_cats) if real_cats else "(none yet)"
 
-        # Include registry hint
-        registry_hint = self._registry.build_hint()
+        # Registry hint disabled — accumulates garbage that poisons small model prompts
+        registry_hint = ""
 
         prompt = f"""These files were put in fallback categories because the system wasn't sure. Look at each file's name, folder, and content. Assign a real subject category with a subcategory if possible.
 
