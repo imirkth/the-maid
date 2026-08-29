@@ -225,86 +225,73 @@ class LLMManager:
         if registry_hint:
             registry_hint = f"\n{registry_hint}\nReuse these categories when appropriate. Add new ones only if a file doesn't fit any existing category.\n"
 
-        prompt = f"""For each file, assign a content-based category hierarchy based on what the file is ABOUT.
-Use broad subjects as top-level categories and more specific topics as subcategories.
-Think about how a person would organize their own files — practical, intuitive categories.
+        prompt = f"""You are a file organizer. Your job is to PROPOSE a better folder structure for the user's files.
+The user already has these files in folders. The existing folder structure is their current organization.
+Your proposed structure must be BETTER than what they have now — never worse, never more generic.
+
+CORE PRINCIPLE: The existing folder structure is the strongest signal of user intent. Respect it.
+A file already in "Eleanor/" is there because the user put it there. Moving it to "Pictures" is a DOWNGRADE.
+Only change a file's category when you can genuinely improve its organization.
+
+WHEN TO KEEP THE EXISTING STRUCTURE:
+- The folder name is specific and meaningful (person names, project names, place names, event names).
+  e.g. "Eleanor/", "Bali 2022/", "the-maid/", "Cryocare Services/" → keep as-is, just map to a sensible top-level category.
+- Files in the same folder should stay together in the same category/subcategory.
+- A folder like "photo 2022/" is fine but could be improved to "2022/Bali" if EXIF GPS confirms the location.
+
+WHEN TO IMPROVE:
+- Generic folder names that could be more specific: "photo 2022" → "Travel > 2022 Bali" (if EXIF shows Bali GPS).
+- Folder names that are unclear or inconsistent: "stuff", "misc", "new folder (3)" → replace with meaningful categories.
+- Files loose in the root with no folder structure → categorize from content/EXIF/filename.
+- A folder mixing unrelated files → split into appropriate categories.
 
 HIERARCHY RULES:
-- Use BROAD subjects as top-level categories: Finance, Law, Work, Personal, Software, Travel, Recipes, Health, Education, Engineering, Game Development, etc.
-- Use SPECIFIC topics as subcategories: Finance > Cryptocurrency, Finance > Taxes, Finance > Investments, Work > Projects, Work > Meeting Notes, etc.
-- Cryptocurrency should be Finance > Cryptocurrency, NOT a top-level category.
-- Software tools and installers go under Software (no subcategory needed).
+- Top-level categories are BROAD subjects: Finance, Law, Work, Personal, Software, Travel, Recipes, Health, Education, Engineering, Game Development, Photos, etc.
+- Subcategories are SPECIFIC: Finance > Cryptocurrency, Travel > 2022 Bali, Photos > Eleanor, Work > Meeting Notes.
+- Person names (Eleanor, Sarah, Tom) are subcategories under Photos or Personal, NOT top-level categories.
+- When a folder is already named after a person or place, use that name as the subcategory.
+  e.g. "Eleanor/IMG_1234.jpg" → Photos > Eleanor (NOT "Pictures", NOT "Personal > Family Events").
 
-FOLDER STRUCTURE RULES:
-- The file path shown in the manifest is the user's EXISTING organization — respect it.
-- Files that are in the same project folder SHOULD stay together in the same category/subcategory.
-  e.g. files under 'the-maid/' should all be categorized under Game Development > The Maid or Software > The Maid.
-- If a folder clearly represents a project or topic, use that as the subcategory.
-  e.g. 'Crypto Projects/btc_analysis.xlsx' -> Finance > Cryptocurrency (NOT 'Crypto Projects').
-- But if the folder IS the natural category (e.g. 'Recipes/', 'Travel/'), match it to the right top-level category.
-- Do NOT copy folder names as categories. Instead, understand what the folder is ABOUT and use that subject.
+EXIF AND FACE DATA:
+- [EXIF: ...] gives camera model, date taken, GPS coordinates, resolution.
+- [FACES: N (labels)] gives face count and cluster labels (may be "Unknown_Person_N" if not yet named).
+- Use GPS for travel/location categorization. Use camera+date for event detection.
+- Face labels help identify people in photos — if a folder is named after a person and faces are detected, the folder name is likely the person's name.
+- Unknown_Person_N labels mean the face was detected but not yet named. Don't treat them as meaningful names.
 
 NEVER use file types like "pdf", "document", "code" as categories — use what the file is ABOUT.
-Only use "Screenshots" for image files with no meaningful content (just a screen grab).
+Only use "Screenshots" for image files with no meaningful content (just a screen grab with no EXIF, no faces, no context).
 Only use "Uncategorized" as a last resort when you truly cannot tell what the file is about.
 
 Format: "id: Category > Subcategory" (or just "id: Category" if no subcategory fits).
 
-Example (with content):
-0: Contract Law Lecture 3.pdf | Consideration in contract law requires a bargained-for exchange
-0: Law > Contract
-1: btc_price.xlsx | BTC-USD price data, moving averages, RSI indicators
-1: Finance > Cryptocurrency
-2: chocolate_cake.pdf | Ingredients: 2 cups flour, 1 cup cocoa. Bake at 180C
-2: Recipes > Desserts
-3: vacation_itinerary.docx | Day 1: Tokyo, Day 2: Kyoto hotels and trains
-3: Travel > Japan
-4: meeting_notes_q2.docx | Q2 revenue review, action items for sales team
-4: Work > Meeting Notes
-5: proton-recovery-phrase.pdf | Recovery kit. Recovery phrase. Proton Account.
-5: Finance > Cryptocurrency
+Example (existing folder is specific — KEEP IT, just add top-level):
+0: Eleanor/IMG_2024_001.jpg | [EXIF: Xiaomi Redmi K40, 2024-06-15, 4624x3472] [FACES: 1 (Unknown_Person_1)] | (no text content, file type: .jpg)
+0: Photos > Eleanor
+1: Bali 2022/IMG_2022_774.jpg | [EXIF: iPhone 13, 2022-07-14, GPS: -8.34°S 115.09°E, 4032x3024] | (no text content, file type: .jpg)
+1: Travel > Bali 2022
+2: the-maid/main.rs | (no text content, file type: .rs)
+2: Game Development > The Maid
+3: Cryocare Services/contract_law_lecture_3.pdf | (no text content, file type: .pdf)
+3: Law > Cryocare Services
 
-Example (no content — use FILENAME and FOLDER as clues):
-6: Cryocare Services/contract_law_lecture_3.pdf | (no text content, file type: .pdf)
-6: Law > Contract
-7: Crypto Projects/btc_analysis_2024.xlsx | (no text content, file type: .xlsx)
-7: Finance > Cryptocurrency
-8: Recipes/grandma_chocolate_cake.pdf | (no text content, file type: .pdf)
-8: Recipes > Desserts
-9: screenshot_2024_03_15.png | (no text content, file type: .png)
-9: Screenshots
-10: Cryocare Services/tort_lecture_1.pdf | (no text content, file type: .pdf)
-10: Law > Tort
-11: backup AI/calculus_homework.pdf | (no text content, file type: .pdf)
-11: Education > Mathematics
-12: Crypto Projects/eth_wallet_recovery.txt | (no text content, file type: .txt)
-12: Finance > Cryptocurrency
-13: backup AI/math_exam_prep.pdf | (no text content, file type: .pdf)
-13: Education > Mathematics
-14: Software/Obsidian-1.12.4.AppImage | (no text content, file type: .appimage)
-14: Software
-15: Crypto Projects/ledger-live-desktop-4.13.1.AppImage | (no text content, file type: .appimage)
-15: Finance > Cryptocurrency
-16: Software/BoseUpdaterInstaller_7.1.13.exe | (no text content, file type: .exe)
-16: Software
-17: Game Development/car_tutorial.rbxl | (no text content, file type: .rbxl)
-17: Game Development > Roblox
-18: Game Development/the-maid/main.rs | (no text content, file type: )
-18: Game Development > The Maid
-19: Gemini_Generated_Image.png | (no text content, file type: .png)
-19: AI Art
+Example (existing folder is generic — IMPROVE IT):
+4: photo 2022/IMG_2022_774.jpg | [EXIF: iPhone 13, 2022-07-14, GPS: -8.34°S 115.09°E, 4032x3024] | (no text content, file type: .jpg)
+4: Travel > Bali 2022
+5: misc/report.pdf | Q2 revenue review, action items for sales team
+5: Work > Meeting Notes
+6: stuff/obsidian_setup.md | Obsidian vault configuration, plugins, daily notes setup
+6: Software > Obsidian
 
-Example (with EXIF and face data — use camera, GPS, and face info as categorization clues):
-20: vacation_2024/img_001.jpg | [EXIF: Canon EOS R6, 2024-07-15, GPS: 35.68°N 139.69°E, 5472x3648] | (no text content, file type: .jpg)
-20: Travel > Japan
-21: family/birthday_party.jpg | [EXIF: Xiaomi Redmi K40, 2024-06-15, 4624x3472] [FACES: 3 (Sarah, Tom, Unknown_Person_2)] | (no text content, file type: .jpg)
-21: Personal > Family Events
-22: work_site/photo_2024.jpg | [EXIF: iPhone 15 Pro, 2024-03-10, GPS: -33.87°S 151.21°E, 4032x3024] [FACES: 2] | (no text content, file type: .jpg)
-22: Work > Construction Site
-23: Crypto Projects/wallet_screenshot.png | [EXIF: Samsung SM-G991B, 2024-08-01, 1080x2400] | (no text content, file type: .png)
-23: Finance > Cryptocurrency
-
-Note: Image files may include [EXIF: ...] with camera model, date taken, GPS coordinates, and resolution, and [FACES: N (labels)] with detected face count and cluster labels. Use these as categorization signals — GPS suggests travel locations, camera model + date can indicate events, face labels can indicate people and social context.
+Example (loose files with no folder — categorize from content):
+7: Contract Law Lecture 3.pdf | Consideration in contract law requires a bargained-for exchange
+7: Law > Contract
+8: btc_price.xlsx | BTC-USD price data, moving averages, RSI indicators
+8: Finance > Cryptocurrency
+9: Gemini_Generated_Image.png | (no text content, file type: .png)
+9: AI Art
+10: screenshot_2024_03_15.png | (no text content, file type: .png)
+10: Screenshots
 {registry_hint}
 Now categorize these {file_count} files:
 {manifest}
@@ -320,37 +307,12 @@ Output one line per file: "id: Category > Subcategory" (or "id: Category" if no 
             )
             assignments = self._parse_hierarchical_lines(text, files)
             if assignments:
-                assignments = self._fix_folder_name_cats(assignments, files)
                 return self._build_tree_from_assignments(assignments)
         except Exception as e:
             print(f"[LLM] Classification error: {e}")
 
         # Fallback to extension rules
         return self._fallback_tree(files).get("tree", [])
-
-    def _fix_folder_name_cats(self, assignments: List[Tuple[int, str, str]], files: List[Dict[str, Any]]) -> List[Tuple[int, str, str]]:
-        """Post-process: detect and fix categories that are actually folder names.
-        Only fixes when the category IS a verbatim folder name AND there's a better
-        subcategory to promote. With the new full-path manifest, the LLM has more
-        context so this is a lighter-touch fixer."""
-        # Collect all folder names from file paths (just the leaf folder)
-        folder_names = set()
-        for f in files:
-            path = f.get("path", "")
-            if path:
-                parent = Path(path).parent.name
-                if parent and parent != ".":
-                    folder_names.add(parent.lower())
-        
-        fixed = []
-        for fid, cat, subcat in assignments:
-            cat_lower = cat.lower().strip()
-            # Only fix if category is a folder name AND we have a subcategory to promote
-            if cat_lower in folder_names and subcat:
-                cat = subcat
-                subcat = ""
-            fixed.append((fid, cat, subcat))
-        return fixed
 
     def _build_tree_from_assignments(self, assignments: List[Tuple[int, str, str]]) -> List[Dict[str, Any]]:
         """Build a hierarchical tree from (file_id, category, subcategory) assignments."""
