@@ -102,25 +102,40 @@ fn resolve_backend_path(app: &tauri::AppHandle) -> PathBuf {
 /// ponytail: AppImage bundles its own libwayland which breaks WebKitGTK EGL on Wayland.
 /// Re-exec with system libwayland-client.so preloaded to fix black screen.
 #[cfg(target_os = "linux")]
-fn fix_appimage_wayland() {
+fn fix_appimage_rendering() {
     let is_appimage = std::env::var("APPIMAGE").is_ok() || std::env::var("APPDIR").is_ok();
-    let is_wayland = std::env::var("WAYLAND_DISPLAY").is_ok()
-        || std::env::var("XDG_SESSION_TYPE").map_or(false, |v| v.trim().eq_ignore_ascii_case("wayland"));
-    if !is_appimage || !is_wayland { return; }
-    if std::env::var("MAID_WAYLAND_PRELOAD_DONE").is_ok() { return; }
+    if !is_appimage { return; }
+    if std::env::var("MAID_RENDER_PRELOAD_DONE").is_ok() { return; }
     if std::env::var("LD_PRELOAD").is_ok() { return; }
 
+    // System libs to preload — overrides AppImage's bundled copies that
+    // conflict with host X11/Wayland WebKitGTK rendering (black screen).
     let candidates = [
         "/usr/lib/x86_64-linux-gnu/libwayland-client.so.0",
-        "/usr/lib/x86_64-linux-gnu/libwayland-client.so",
+        "/usr/lib/x86_64-linux-gnu/libwayland-egl.so.1",
+        "/usr/lib/x86_64-linux-gnu/libgtk-3.so.0",
+        "/usr/lib/x86_64-linux-gnu/libgdk-3.so.0",
         "/lib/x86_64-linux-gnu/libwayland-client.so.0",
+        "/lib/x86_64-linux-gnu/libwayland-egl.so.1",
+        "/lib/x86_64-linux-gnu/libgtk-3.so.0",
+        "/lib/x86_64-linux-gnu/libgdk-3.so.0",
         "/usr/lib64/libwayland-client.so.0",
-        "/usr/lib64/libwayland-client.so",
-        "/lib64/libwayland-client.so.0",
+        "/usr/lib64/libwayland-egl.so.1",
+        "/usr/lib64/libgtk-3.so.0",
+        "/usr/lib64/libgdk-3.so.0",
         "/usr/lib/libwayland-client.so.0",
+        "/usr/lib/libwayland-egl.so.1",
+        "/usr/lib/libgtk-3.so.0",
+        "/usr/lib/libgdk-3.so.0",
     ];
-    let preload = candidates.iter().find(|p| std::path::Path::new(p).is_file());
-    if let Some(path) = preload {
+    let found: Vec<&str> = candidates.iter()
+        .filter(|p| std::path::Path::new(p).is_file())
+        .copied()
+        .collect();
+    if found.is_empty() { return; }
+    let preload_path = found.join(":");
+    log::info!("[The Maid] Preloading system libs for AppImage rendering: {}", preload_path);
+    {
         use std::os::unix::process::CommandExt;
         let exe = std::env::var("APPIMAGE").unwrap_or_else(|_| {
             std::fs::read_link("/proc/self/exe").unwrap_or_default().display().to_string()
@@ -128,26 +143,23 @@ fn fix_appimage_wayland() {
         let args: Vec<_> = std::env::args().skip(1).collect();
         let err = std::process::Command::new(&exe)
             .args(&args)
-            .env("LD_PRELOAD", path)
-            .env("MAID_WAYLAND_PRELOAD_DONE", "1")
+            .env("LD_PRELOAD", &preload_path)
+            .env("MAID_RENDER_PRELOAD_DONE", "1")
             .exec();
-        eprintln!("[The Maid] Wayland preload re-exec failed: {}", err);
+        eprintln!("[The Maid] Render preload re-exec failed: {}", err);
     }
 }
 
 fn main() {
     #[cfg(target_os = "linux")]
     {
-        // ponytail: AppImage + WebKitGTK rendering fixes — set before webview is created.
-        let is_appimage = std::env::var("APPIMAGE").is_ok() || std::env::var("APPDIR").is_ok();
-        if is_appimage {
-            if std::env::var("WEBKIT_DISABLE_DMABUF_RENDERER").is_err() {
-                std::env::set_var("WEBKIT_DISABLE_DMABUF_RENDERER", "1");
-            }
-            if std::env::var("WEBKIT_DISABLE_COMPOSITING_MODE").is_err() {
-                std::env::set_var("WEBKIT_DISABLE_COMPOSITING_MODE", "1");
-            }
-            fix_appimage_wayland();
+        // ponytail: WebKitGTK rendering fixes — set for ALL Linux builds, not just AppImage.
+        // NVIDIA + X11 without compositor = black screen without these.
+        if std::env::var("WEBKIT_DISABLE_DMABUF_RENDERER").is_err() {
+            std::env::set_var("WEBKIT_DISABLE_DMABUF_RENDERER", "1");
+        }
+        if std::env::var("WEBKIT_DISABLE_COMPOSITING_MODE").is_err() {
+            std::env::set_var("WEBKIT_DISABLE_COMPOSITING_MODE", "1");
         }
     }
 
@@ -157,6 +169,24 @@ fn main() {
         .plugin(tauri_plugin_shell::init())
         .setup(|app| {
             let app_handle = app.handle().clone();
+
+            // ponytail: NVIDIA + X11 + no compositor = black screen in Tauri/WRY.
+            // The raw Python WebKit test works fine, so the issue is WRY's
+            // accelerated compositing path. We grab the raw WebView and disable it.
+            #[cfg(target_os = "linux")]
+            {
+                if let Some(window) = app.get_webview_window("main") {
+                    let _ = window.set_background_color(Some(tauri::utils::config::Color(10, 14, 26, 255)));
+                    window.with_webview(|webview| {
+                        use webkit2gtk::{WebViewExt, SettingsExt};
+                        let wv = webview.inner();
+                        if let Some(settings) = wv.settings() {
+                            settings.set_enable_accelerated_2d_canvas(false);
+                        }
+                    });
+                }
+            }
+
             let backend_path = resolve_backend_path(&app_handle);
 
             // Resolve resources dir for bundled LLM

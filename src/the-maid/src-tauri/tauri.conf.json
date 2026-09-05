@@ -4,10 +4,10 @@
   "version": "0.1.0",
   "identifier": "com.themaid.app",
   "build": {
-    "beforeDevCommand": "cd ../src && npm run dev",
-    "devUrl": "http://localhost:1420",
-    "beforeBuildCommand": "cd ../src && npm run build",
-    "frontendDist": "../src/dist"
+    "beforeDevCommand": "cd /home/imirk/.openclaw/workspace-the-maid/src/the-maid/src && npm run dev",
+    "beforeBuildCommand": "cd /home/imirk/.openclaw/workspace-the-maid/src/the-maid/src && npm run build",
+    "frontendDist": "../src/dist",
+    "devUrl": "http://localhost:1420"
   },
   "app": {
     "windows": [
@@ -20,12 +20,17 @@
       }
     ],
     "security": {
-      "csp": "default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data:; connect-src 'self' https://themaid.app"
+      "csp": "default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data:; connect-src 'self' https://themaid.app https://models.themaid.app"
     }
   },
   "bundle": {
     "active": true,
-    "targets": ["nsis", "msi"],
+    "targets": [
+      "nsis",
+      "msi",
+      "deb",
+      "appimage"
+    ],
     "icon": [
       "icons/32x32.png",
       "icons/128x128.png",
@@ -33,10 +38,16 @@
       "icons/icon.icns",
       "icons/icon.ico"
     ],
+    "resources": [
+      "resources/the-maid-backend.tar.gz",
+      "resources/llama/*"
+    ],
     "windows": {
       "nsis": {
         "installMode": "currentUser",
-        "languages": ["English"],
+        "languages": [
+          "English"
+        ],
         "displayLanguageSelector": false,
         "installerHooks": "./windows/installer-hooks.nsi",
         "headerImage": null,
