@@ -4,7 +4,6 @@ import {
   type LightningInvoice,
   validateDonationAmount,
   generateInvoiceQrDataUrl,
-  parseBolt11Expiry,
   isInvoiceExpired,
   isPaymentSettled,
   formatExpiryCountdown,
@@ -71,10 +70,6 @@ export function useDonation(): UseDonationReturn {
             "Invoice expiry is invalid; automatic payment verification is disabled.";
         }
       }
-      if (expiry === undefined && !expiryError) {
-        expiry = parseBolt11Expiry(result.bolt11) ?? undefined;
-      }
-
       setInvoice({ ...result, qr_data_url, expiry });
       if (expiryError) {
         setDonationError(expiryError);

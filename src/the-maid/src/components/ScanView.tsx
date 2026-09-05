@@ -360,6 +360,8 @@ export default function ScanView() {
     setAcceptedSubs(prev => { const n = new Set(prev); n.delete(key); return n; });
   };
 
+  const hasTree = tree && tree.tree && tree.tree.length > 0;
+
   // All categories must have a decision before approving
   const allCatsDecided = hasTree ? tree!.tree.every(c =>
     c.name === "Uncategorized" || acceptedCats.has(c.name) || refusedCats.has(c.name)
@@ -446,7 +448,6 @@ export default function ScanView() {
   };
 
   const scanDisabled = scanning || !directory || !backendReady || !canScan;
-  const hasTree = tree && tree.tree && tree.tree.length > 0;
   const allCategoryNames = hasTree ? tree!.tree.map(c => c.name).filter(n => n !== "Uncategorized") : [];
 
   // --- Render helpers ---

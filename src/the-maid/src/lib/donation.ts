@@ -2,7 +2,6 @@
 // Pure functions for validation, polling, formatting, and bolt11 parsing.
 
 import QRCode from "qrcode";
-import * as bolt11 from "bolt11";
 
 export const MIN_DONATION_SATS = 1;
 export const MAX_DONATION_SATS = 10_000_000;
@@ -48,26 +47,6 @@ export function truncateInvoice(invoice: string, max = 40): string {
 
 export async function generateInvoiceQrDataUrl(bolt11Invoice: string): Promise<string> {
   return QRCode.toDataURL(bolt11Invoice, { width: 256, margin: 2 });
-}
-
-/**
- * Parse bolt11 invoice expiry as a Unix timestamp (seconds).
- * Returns null if parsing fails or no expiry tag present.
- */
-export function parseBolt11Expiry(bolt11Invoice: string): number | null {
-  try {
-    const decoded = bolt11.decode(bolt11Invoice);
-    if (decoded.timeExpireDate) {
-      return decoded.timeExpireDate;
-    }
-    const expiryTag = decoded.tags.find((t) => t.tagName === "expire_time");
-    if (expiryTag && typeof expiryTag.data === "number") {
-      return decoded.timestamp + expiryTag.data;
-    }
-    return null;
-  } catch {
-    return null;
-  }
 }
 
 export function isInvoiceExpired(expiryTimestampSeconds: number): boolean {
