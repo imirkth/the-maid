@@ -8,7 +8,7 @@ dist/
 # Python
 __pycache__/
 *.pyc
-.venv/
+.venv*/
 
 # OS
 .DS_Store
@@ -24,3 +24,14 @@ Thumbs.db
 
 # OpenClaw
 .scratch/
+
+# Large build artifacts & bundles — never commit
+*.AppImage
+src/the-maid/backend/build/
+src/the-maid/backend/models/
+src/the-maid/src-tauri/resources/
+src/the-maid/src-tauri/squashfs-root/
+src/the-maid/src-tauri/vite
+
+# Local staging data (private test files)
+/media/
