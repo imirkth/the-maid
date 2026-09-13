@@ -1,0 +1,36 @@
+#!/bin/bash
+# The Maid DEBUG launcher — NVIDIA + X11 + WebKitGTK black screen fix
+export MAID_WORKSPACE="${MAID_WORKSPACE:-$HOME/.openclaw/workspace-the-maid}"
+export RUST_LOG=info
+
+# Kill stale Vite dev server and backend
+fuser -k 1420/tcp 2>/dev/null
+fuser -k 9473/tcp 2>/dev/null
+sleep 1
+
+# Start Vite dev server in background
+cd "$MAID_WORKSPACE/src/the-maid/src"
+npm run dev &
+VITE_PID=$!
+
+# Wait for Vite to be ready
+for i in $(seq 1 15); do
+  if curl -s http://localhost:1420 >/dev/null 2>&1; then
+    echo "Vite dev server ready"
+    break
+  fi
+  sleep 1
+done
+
+# WebKitGTK 2.52 + NVIDIA + X11 black screen fixes
+# Force Skia CPU rendering (bypasses GPU/EGL entirely)
+export WEBKIT_SKIA_ENABLE_CPU_RENDERING=1
+# Disable dma-buf renderer (NVIDIA EGL doesn't play nice)
+export WEBKIT_DISABLE_DMABUF_RENDERER=1
+export WEBKIT_DMABUF_RENDERER_FORCE_SHM=1
+# Disable compositing mode (no compositor on this X11 setup)
+export WEBKIT_DISABLE_COMPOSITING_MODE=1
+# Force X11 backend (no Wayland)
+export GDK_BACKEND=x11
+
+exec "$HOME/.local/bin/the-maid-debug" "$@"

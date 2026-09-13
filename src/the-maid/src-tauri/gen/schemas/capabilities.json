@@ -1,0 +1,1 @@
+{"default":{"identifier":"default","description":"Default app permissions for The Maid","local":true,"windows":["main"],"permissions":["shell:allow-open"]}}

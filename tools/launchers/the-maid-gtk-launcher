@@ -1,0 +1,96 @@
+#!/usr/bin/env python3
+"""
+The Maid GTK Launcher — bypasses Tauri/WRY window creation
+Uses the same Gtk+WebKit approach as the working test.
+"""
+import subprocess
+import sys
+import os
+import signal
+import time
+import threading
+import urllib.request
+
+WORKSPACE = os.environ.get("MAID_WORKSPACE", os.path.expanduser("~/.openclaw/workspace-the-maid"))
+FRONTEND_URL = "http://localhost:1420"
+
+def kill_port(port):
+    try:
+        subprocess.run(["fuser", "-k", f"{port}/tcp"], capture_output=True, timeout=3)
+    except:
+        pass
+
+def wait_for_url(url, timeout=15):
+    for _ in range(timeout):
+        try:
+            urllib.request.urlopen(url, timeout=1)
+            return True
+        except:
+            time.sleep(1)
+    return False
+
+def main():
+    os.environ["WEBKIT_DISABLE_DMABUF_RENDERER"] = "1"
+    os.environ["WEBKIT_DISABLE_COMPOSITING_MODE"] = "1"
+    
+    # Kill stale processes
+    kill_port(1420)
+    kill_port(9473)
+    time.sleep(0.5)
+    
+    # Start Vite dev server
+    frontend_dir = os.path.join(WORKSPACE, "src/the-maid/src")
+    vite = subprocess.Popen(["npm", "run", "dev"], cwd=frontend_dir,
+                          stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+    
+    print("Starting Vite dev server...")
+    if not wait_for_url(FRONTEND_URL):
+        print("ERROR: Vite dev server didn't start")
+        vite.kill()
+        sys.exit(1)
+    print(f"Vite ready at {FRONTEND_URL}")
+    
+    # Start Python backend
+    backend_path = os.path.join(WORKSPACE, "src/the-maid/backend/run.py")
+    backend = subprocess.Popen(["python3", backend_path],
+                              stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+    print("Python backend starting...")
+    
+    # Now create the GTK window (same as the working test)
+    import gi
+    gi.require_version('Gtk', '3.0')
+    gi.require_version('WebKit2', '4.1')
+    from gi.repository import Gtk, WebKit2, GLib
+    
+    win = Gtk.Window()
+    win.set_title("The Maid")
+    win.set_default_size(1200, 800)
+    win.connect("destroy", lambda w: Gtk.main_quit())
+    
+    web = WebKit2.WebView()
+    
+    # Enable devtools
+    settings = web.get_settings()
+    settings.set_enable_developer_extras(True)
+    
+    web.load_uri(FRONTEND_URL)
+    win.add(web)
+    win.show_all()
+    
+    print("Window created — loading UI...")
+    
+    # Clean up on exit
+    def on_quit():
+        vite.kill()
+        backend.kill()
+        Gtk.main_quit()
+    
+    win.connect("destroy", lambda w: on_quit())
+    
+    try:
+        Gtk.main()
+    except KeyboardInterrupt:
+        on_quit()
+
+if __name__ == "__main__":
+    main()

@@ -28,7 +28,9 @@ function App() {
   useEffect(() => {
     invoke<{ first_run: boolean; setup_complete: boolean }>("get_settings")
       .then((s) => {
-        setIsFirstRun(s.first_run || !s.setup_complete);
+        const firstRun = s.first_run || !s.setup_complete;
+        setIsFirstRun(firstRun);
+        if (!firstRun) setCurrentView("scan");
         setLoaded(true);
       })
       .catch(() => setLoaded(true)); // defaults to first run

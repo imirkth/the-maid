@@ -1,0 +1,6 @@
+#!/bin/bash
+# The Maid launcher — uses system WebKitGTK (not AppImage's bundled one)
+export MAID_WORKSPACE="${MAID_WORKSPACE:-$HOME/.openclaw/workspace-the-maid}"
+export WEBKIT_DISABLE_DMABUF_RENDERER=1
+export WEBKIT_DISABLE_COMPOSITING_MODE=1
+exec "$HOME/.local/bin/the-maid" "$@"

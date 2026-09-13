@@ -8,6 +8,17 @@ use std::fs;
 use std::path::{Path, PathBuf};
 use tauri::{Emitter, State};
 
+// ponytail: rfd-based folder picker — GTK dialog plugin shows "no choices provided" on Linux.
+#[tauri::command]
+pub async fn pick_folder() -> Result<Option<String>, String> {
+    let folder = rfd::AsyncFileDialog::new()
+        .set_title("Choose a folder for The Maid to organize")
+        .pick_folder()
+        .await
+        .map(|p| p.path().display().to_string());
+    Ok(folder)
+}
+
 // --- Helpers ---
 
 fn sha256_file(path: &Path) -> Result<String, String> {
@@ -141,6 +152,13 @@ fn expand_tilde(path: &str) -> String {
             return format!("{}/{}", home, &path[2..]);
         }
     }
+    // ponytail: bare folder names like "Desktop" → resolve under home dir.
+    // Matches Python sandbox.py DEFAULT_SANDBOX_FOLDERS convention.
+    if !path.starts_with('/') && !path.contains(":\\") && !path.contains(":/") && !path.contains('/') {
+        if let Ok(home) = std::env::var("HOME").or_else(|_| std::env::var("USERPROFILE")) {
+            return format!("{}/{}", home, path);
+        }
+    }
     path.to_string()
 }
 
@@ -169,6 +187,16 @@ fn validate_path(path: &str, sandbox_folders: &[String]) -> Result<String, Strin
     if sandbox_folders.is_empty() {
         return Ok(expanded);
     }
+
+    // ponytail: resolve bare relative paths to $HOME so canonicalize can find them
+    let expanded = if expanded.starts_with('/') || expanded.contains(":\\") || expanded.contains(":/") {
+        expanded
+    } else {
+        let home = std::env::var("HOME")
+            .or_else(|_| std::env::var("USERPROFILE"))
+            .unwrap_or_default();
+        format!("{}/{}", home, expanded)
+    };
 
     // ponytail: resolve symlinks before containment check, matching Python sandbox.py
     let canonical = std::fs::canonicalize(Path::new(&expanded))
@@ -243,17 +271,18 @@ pub struct ScanResponse {
 #[tauri::command]
 pub async fn scan_directory(request: ScanRequest) -> Result<ScanResponse, String> {
     let settings = Settings::load()?;
-    validate_path(&request.directory, &settings.sandbox_folders)?;
+    let expanded_dir = expand_tilde(&request.directory);
+    validate_path(&expanded_dir, &settings.sandbox_folders)?;
 
     // Call Python backend HTTP API
     let client = reqwest::Client::builder()
-        .timeout(std::time::Duration::from_secs(60))
+        .timeout(std::time::Duration::from_secs(600))
         .build()
         .map_err(|e| format!("HTTP client error: {}", e))?;
 
     let body = serde_json::json!({
-        "directory": request.directory,
-        "max_files": request.max_files.unwrap_or(10000),
+        "directory": expanded_dir,
+        "max_files": request.max_files.unwrap_or(100000),
     });
 
     let resp = client
@@ -349,7 +378,244 @@ pub async fn approve_and_clean(request: ApprovalRequest) -> Result<Vec<serde_jso
     Ok(results)
 }
 
-// --- Cleanup Plan commands ---
+// --- Categorize (LLM content analysis) ---
+
+#[tauri::command]
+pub async fn categorize_files(files: Vec<serde_json::Value>, directory: Option<String>) -> Result<serde_json::Value, String> {
+    let client = reqwest::Client::builder()
+        .timeout(std::time::Duration::from_secs(3600))
+        .build()
+        .map_err(|e| format!("HTTP client error: {}", e))?;
+
+    let body = serde_json::json!({ "files": files, "directory": directory.unwrap_or_default() });
+
+    let resp = client
+        .post("http://127.0.0.1:9473/categorize")
+        .json(&body)
+        .send()
+        .await
+        .map_err(|e| format!("Failed to reach Python backend: {}", e))?;
+
+    if !resp.status().is_success() {
+        let status = resp.status();
+        let text = resp.text().await.unwrap_or_default();
+        return Err(format!("Python backend error ({}): {}", status, text));
+    }
+
+    let result: serde_json::Value = resp
+        .json()
+        .await
+        .map_err(|e| format!("Failed to parse categorize response: {}", e))?;
+
+    Ok(result)
+}
+
+// --- Persistent Tree Commands ---
+
+#[tauri::command]
+pub async fn get_tree() -> Result<serde_json::Value, String> {
+    let client = reqwest::Client::builder()
+        .timeout(std::time::Duration::from_secs(10))
+        .build()
+        .map_err(|e| format!("HTTP client error: {}", e))?;
+    let resp = client
+        .get("http://127.0.0.1:9473/tree")
+        .send()
+        .await
+        .map_err(|e| format!("Failed to reach Python backend: {}", e))?;
+    if !resp.status().is_success() {
+        return Err(format!("Python backend error: {}", resp.status()));
+    }
+    resp.json().await.map_err(|e| format!("Failed to parse tree response: {}", e))
+}
+
+#[tauri::command]
+pub async fn save_tree(tree_state: serde_json::Value) -> Result<(), String> {
+    let client = reqwest::Client::builder()
+        .timeout(std::time::Duration::from_secs(10))
+        .build()
+        .map_err(|e| format!("HTTP client error: {}", e))?;
+    let resp = client
+        .post("http://127.0.0.1:9473/tree")
+        .json(&tree_state)
+        .send()
+        .await
+        .map_err(|e| format!("Failed to reach Python backend: {}", e))?;
+    if !resp.status().is_success() {
+        return Err(format!("Python backend error: {}", resp.status()));
+    }
+    Ok(())
+}
+
+#[tauri::command]
+pub async fn merge_tree(categories: Vec<serde_json::Value>, total_files: i64, total_categorized: i64) -> Result<serde_json::Value, String> {
+    let client = reqwest::Client::builder()
+        .timeout(std::time::Duration::from_secs(10))
+        .build()
+        .map_err(|e| format!("HTTP client error: {}", e))?;
+    let body = serde_json::json!({
+        "categories": categories,
+        "total_files": total_files,
+        "total_categorized": total_categorized,
+    });
+    let resp = client
+        .put("http://127.0.0.1:9473/tree/merge")
+        .json(&body)
+        .send()
+        .await
+        .map_err(|e| format!("Failed to reach Python backend: {}", e))?;
+    if !resp.status().is_success() {
+        return Err(format!("Python backend error: {}", resp.status()));
+    }
+    resp.json().await.map_err(|e| format!("Failed to parse merge response: {}", e))
+}
+
+#[tauri::command]
+pub async fn edit_category(old_name: String, new_name: Option<String>, delete: bool) -> Result<serde_json::Value, String> {
+    let client = reqwest::Client::builder()
+        .timeout(std::time::Duration::from_secs(10))
+        .build()
+        .map_err(|e| format!("HTTP client error: {}", e))?;
+    let body = serde_json::json!({
+        "old_name": old_name,
+        "new_name": new_name,
+        "delete": delete,
+    });
+    let resp = client
+        .put("http://127.0.0.1:9473/tree/category")
+        .json(&body)
+        .send()
+        .await
+        .map_err(|e| format!("Failed to reach Python backend: {}", e))?;
+    if !resp.status().is_success() {
+        return Err(format!("Python backend error: {}", resp.status()));
+    }
+    resp.json().await.map_err(|e| format!("Failed to parse response: {}", e))
+}
+
+#[tauri::command]
+pub async fn move_file_in_tree(file_id: String, target_category: String, target_subcategory: String) -> Result<serde_json::Value, String> {
+    let client = reqwest::Client::builder()
+        .timeout(std::time::Duration::from_secs(10))
+        .build()
+        .map_err(|e| format!("HTTP client error: {}", e))?;
+    let body = serde_json::json!({
+        "file_id": file_id,
+        "target_category": target_category,
+        "target_subcategory": target_subcategory,
+    });
+    let resp = client
+        .put("http://127.0.0.1:9473/tree/file")
+        .json(&body)
+        .send()
+        .await
+        .map_err(|e| format!("Failed to reach Python backend: {}", e))?;
+    if !resp.status().is_success() {
+        return Err(format!("Python backend error: {}", resp.status()));
+    }
+    resp.json().await.map_err(|e| format!("Failed to parse response: {}", e))
+}
+
+#[tauri::command]
+pub async fn approve_tree_structure() -> Result<(), String> {
+    let client = reqwest::Client::builder()
+        .timeout(std::time::Duration::from_secs(10))
+        .build()
+        .map_err(|e| format!("HTTP client error: {}", e))?;
+    let resp = client
+        .post("http://127.0.0.1:9473/tree/approve")
+        .send()
+        .await
+        .map_err(|e| format!("Failed to reach Python backend: {}", e))?;
+    if !resp.status().is_success() {
+        return Err(format!("Python backend error: {}", resp.status()));
+    }
+    Ok(())
+}
+
+#[tauri::command]
+pub async fn execute_tree_moves(approved_file_ids: Vec<String>) -> Result<serde_json::Value, String> {
+    let client = reqwest::Client::builder()
+        .timeout(std::time::Duration::from_secs(300))
+        .build()
+        .map_err(|e| format!("HTTP client error: {}", e))?;
+    let resp = client
+        .post("http://127.0.0.1:9473/tree/execute")
+        .json(&approved_file_ids)
+        .send()
+        .await
+        .map_err(|e| format!("Failed to reach Python backend: {}", e))?;
+    if !resp.status().is_success() {
+        return Err(format!("Python backend error: {}", resp.status()));
+    }
+    resp.json().await.map_err(|e| format!("Failed to parse response: {}", e))
+}
+
+#[tauri::command]
+pub async fn edit_subcategory(category_name: String, old_subname: String, new_subname: Option<String>, delete: bool) -> Result<serde_json::Value, String> {
+    let client = reqwest::Client::builder()
+        .timeout(std::time::Duration::from_secs(10))
+        .build()
+        .map_err(|e| format!("HTTP client error: {}", e))?;
+    let body = serde_json::json!({
+        "category_name": category_name,
+        "old_subname": old_subname,
+        "new_subname": new_subname,
+        "delete": delete,
+    });
+    let resp = client
+        .put("http://127.0.0.1:9473/tree/subcategory")
+        .json(&body)
+        .send().await
+        .map_err(|e| format!("Failed to reach Python backend: {}", e))?;
+    if !resp.status().is_success() {
+        return Err(format!("Python backend error: {}", resp.status()));
+    }
+    resp.json().await.map_err(|e| format!("Failed to parse response: {}", e))
+}
+
+#[tauri::command]
+pub async fn merge_categories(source_name: String, target_name: String) -> Result<serde_json::Value, String> {
+    let client = reqwest::Client::builder()
+        .timeout(std::time::Duration::from_secs(10))
+        .build()
+        .map_err(|e| format!("HTTP client error: {}", e))?;
+    let body = serde_json::json!({
+        "source_name": source_name,
+        "target_name": target_name,
+    });
+    let resp = client
+        .put("http://127.0.0.1:9473/tree/merge-categories")
+        .json(&body)
+        .send().await
+        .map_err(|e| format!("Failed to reach Python backend: {}", e))?;
+    if !resp.status().is_success() {
+        return Err(format!("Python backend error: {}", resp.status()));
+    }
+    resp.json().await.map_err(|e| format!("Failed to parse response: {}", e))
+}
+
+#[tauri::command]
+pub async fn bulk_move_files(file_ids: Vec<String>, target_category: String, target_subcategory: String) -> Result<serde_json::Value, String> {
+    let client = reqwest::Client::builder()
+        .timeout(std::time::Duration::from_secs(10))
+        .build()
+        .map_err(|e| format!("HTTP client error: {}", e))?;
+    let body = serde_json::json!({
+        "file_ids": file_ids,
+        "target_category": target_category,
+        "target_subcategory": target_subcategory,
+    });
+    let resp = client
+        .put("http://127.0.0.1:9473/tree/bulk-move")
+        .json(&body)
+        .send().await
+        .map_err(|e| format!("Failed to reach Python backend: {}", e))?;
+    if !resp.status().is_success() {
+        return Err(format!("Python backend error: {}", resp.status()));
+    }
+    resp.json().await.map_err(|e| format!("Failed to parse response: {}", e))
+}
 
 #[derive(Serialize, Deserialize, Debug, Clone)]
 pub struct CleanupItemCmd {
@@ -397,6 +663,13 @@ pub async fn add_bucket(bucket: Bucket) -> Result<(), String> {
     let mut settings = Settings::load()?;
     validate_path(&bucket.path, &settings.sandbox_folders)?;
     settings.add_bucket(&bucket.name, &bucket.path);
+    settings.save()
+}
+
+#[tauri::command]
+pub async fn remove_bucket(id: String) -> Result<(), String> {
+    let mut settings = Settings::load()?;
+    settings.remove_bucket(&id);
     settings.save()
 }
 
@@ -467,6 +740,8 @@ pub async fn download_model(model_id: String, app_handle: tauri::AppHandle) -> R
         .iter()
         .find(|(id, _, _)| *id == model_id)
         .ok_or_else(|| format!("Unknown model: {}", model_id))?;
+    let url = *url;
+    let expected_sha256 = *expected_sha256;
 
     let dir = models_dir()?;
     std::fs::create_dir_all(&dir).map_err(|e| format!("Failed to create models dir: {}", e))?;
@@ -501,7 +776,8 @@ pub async fn download_model(model_id: String, app_handle: tauri::AppHandle) -> R
         // restart from scratch.
         if resume_from > 0 {
             std::fs::remove_file(&tmp).ok();
-            return download_model(model_id, app_handle).await;
+            // ponytail: Box::pin to break infinite async fn size
+            return Box::pin(download_model(model_id, app_handle)).await;
         }
         return Err(format!("Server error: {}", resp.status()));
     }
@@ -693,9 +969,9 @@ pub async fn get_model_status() -> Result<Vec<ModelStatus>, String> {
     let models_dir = PathBuf::from(home).join(".the-maid").join("models");
 
     let models = vec![
-        ("text", "Text LLM", 500),
-        ("pdf", "PDF OCR Model", 1000),
-        ("face", "Face Recognition Model", 100),
+        ("text", "Text LLM", 500_u64),
+        ("pdf", "PDF OCR Model", 1000_u64),
+        ("face", "Face Recognition Model", 100_u64),
     ];
 
     Ok(models
@@ -717,7 +993,7 @@ pub async fn get_model_status() -> Result<Vec<ModelStatus>, String> {
             ModelStatus {
                 id: id.to_string(),
                 name: name.to_string(),
-                size_mb,
+                size_mb: *size_mb,
                 downloaded,
                 path,
             }
@@ -753,11 +1029,50 @@ pub struct RenameResult {
 
 const MAX_LABEL_LENGTH: usize = 100;
 
+/// Fetch face clusters from Python backend GET /faces/clusters
+async fn fetch_clusters_from_backend() -> Result<Vec<FaceClusterInfo>, String> {
+    let url = "http://127.0.0.1:9473/faces/clusters";
+    let resp = reqwest::get(url).await
+        .map_err(|e| format!("Failed to reach backend: {e}"))?;
+    let json: serde_json::Value = resp.json().await
+        .map_err(|e| format!("Bad response: {e}"))?;
+    let clusters = json.get("clusters")
+        .and_then(|c| c.as_array())
+        .ok_or("Missing 'clusters' in response")?;
+    let result: Vec<FaceClusterInfo> = clusters.iter().filter_map(|c| {
+        let cluster_id = c.get("cluster_id")?.as_i64()?;
+        let cluster_label = c.get("cluster_label")?.as_str()?.to_string();
+        let face_count = c.get("face_count")?.as_u64()? as usize;
+        let representative_path = c.get("representative")
+            .and_then(|r| r.get("file_path"))
+            .and_then(|p| p.as_str())
+            .unwrap_or("")
+            .to_string();
+        let faces: Vec<FaceClusterFace> = c.get("faces")
+            .and_then(|f| f.as_array())
+            .unwrap_or(&Vec::new())
+            .iter()
+            .filter_map(|f| {
+                Some(FaceClusterFace {
+                    file_id: f.get("file_id")?.as_str()?.to_string(),
+                    file_path: f.get("file_path")?.as_str()?.to_string(),
+                })
+            })
+            .collect();
+        Some(FaceClusterInfo {
+            cluster_id,
+            cluster_label,
+            face_count,
+            representative_path,
+            faces,
+        })
+    }).collect();
+    Ok(result)
+}
+
 #[tauri::command]
 pub async fn get_face_clusters() -> Result<Vec<FaceClusterInfo>, String> {
-    // TODO: delegate to Python backend via sidecar event
-    // For now return empty — Python face_cluster.py owns the data
-    Ok(vec![])
+    fetch_clusters_from_backend().await
 }
 
 #[tauri::command]
@@ -765,8 +1080,6 @@ pub async fn rename_face_cluster(
     cluster_id: i64,
     new_label: String,
 ) -> Result<RenameResult, String> {
-    // Rust validates the label is non-empty and not too long before
-    // delegating to the Python backend for the actual rename + XMP write.
     let trimmed = new_label.trim();
     if trimmed.is_empty() {
         return Err("Cluster label cannot be empty".to_string());
@@ -777,12 +1090,26 @@ pub async fn rename_face_cluster(
             MAX_LABEL_LENGTH
         ));
     }
+    // Delegate to Python backend POST /faces/tag
+    let client = reqwest::Client::new();
+    let resp = client.post("http://127.0.0.1:9473/faces/tag")
+        .json(&serde_json::json!({
+            "cluster_id": cluster_id.to_string(),
+            "name": trimmed,
+        }))
+        .send().await
+        .map_err(|e| format!("Backend unreachable: {e}"))?;
+    let result: serde_json::Value = resp.json().await
+        .map_err(|e| format!("Bad response: {e}"))?;
     Ok(RenameResult {
-        renamed: 0,
-        tagged: 0,
-        skipped: 0,
-        errors: vec![],
-        success: true,
+        renamed: result.get("renamed").and_then(|v| v.as_i64()).unwrap_or(0),
+        tagged: result.get("tagged").and_then(|v| v.as_i64()).unwrap_or(0),
+        skipped: result.get("skipped").and_then(|v| v.as_i64()).unwrap_or(0),
+        errors: result.get("errors")
+            .and_then(|e| e.as_array())
+            .map(|arr| arr.iter().filter_map(|v| v.as_str().map(String::from)).collect())
+            .unwrap_or_default(),
+        success: result.get("success").and_then(|v| v.as_bool()).unwrap_or(false),
     })
 }
 
@@ -838,18 +1165,29 @@ mod tests {
 
     #[test]
     fn test_validate_path_allows_sandbox_folders() {
-        let home = std::env::var("HOME").unwrap_or_default();
+        // ponytail: use own temp HOME to avoid race with settings tests
+        let tmp = std::env::temp_dir().join(format!("the-maid-validate-test-{}", std::process::id()));
+        std::fs::create_dir_all(tmp.join("Desktop")).unwrap();
+        std::fs::write(tmp.join("Desktop").join("file.txt"), "test").unwrap();
+        std::env::set_var("HOME", &tmp);
         let folders = vec!["Desktop".to_string(), "Downloads".to_string()];
-        let result = validate_path(&format!("{}/Desktop/file.txt", home), &folders);
+        let result = validate_path(&format!("{}/Desktop/file.txt", tmp.to_string_lossy()), &folders);
         assert!(result.is_ok());
+        std::fs::remove_dir_all(&tmp).ok();
     }
 
     #[test]
     fn test_validate_path_rejects_outside_sandbox() {
         let folders = vec!["Desktop".to_string()];
-        let result = validate_path("/tmp/random/file.txt", &folders);
+        // ponytail: create a real temp file outside the sandbox to pass canonicalize
+        let tmp = std::env::temp_dir().join(format!("the-maid-test-outside-{}", std::process::id()));
+        std::fs::create_dir_all(&tmp).unwrap();
+        let test_file = tmp.join("random.txt");
+        std::fs::write(&test_file, "test").unwrap();
+        let result = validate_path(&test_file.to_string_lossy(), &folders);
         assert!(result.is_err());
         assert!(result.unwrap_err().contains("outside the sandbox"));
+        std::fs::remove_dir_all(&tmp).ok();
     }
 
     #[test]
@@ -861,28 +1199,43 @@ mod tests {
 
     #[test]
     fn test_validate_path_expands_tilde() {
-        let home = std::env::var("HOME").unwrap_or_default();
+        // ponytail: use own temp HOME to avoid race with settings tests
+        let tmp = std::env::temp_dir().join(format!("the-maid-tilde-test-{}", std::process::id()));
+        std::fs::create_dir_all(tmp.join("Desktop")).unwrap();
+        std::fs::write(tmp.join("Desktop").join("file.txt"), "test").unwrap();
+        std::env::set_var("HOME", &tmp);
         let folders = vec!["Desktop".to_string()];
         let result = validate_path("~/Desktop/file.txt", &folders);
         assert!(result.is_ok());
-        assert_eq!(result.unwrap(), format!("{}/Desktop/file.txt", home));
+        assert_eq!(result.unwrap(), format!("{}/Desktop/file.txt", tmp.to_string_lossy()));
+        std::fs::remove_dir_all(&tmp).ok();
     }
 
     #[test]
     fn test_validate_path_accepts_bare_folder_name() {
-        let home = std::env::var("HOME").unwrap_or_default();
+        // ponytail: use own temp HOME to avoid race with settings tests
+        let tmp = std::env::temp_dir().join(format!("the-maid-bare-test-{}", std::process::id()));
+        std::fs::create_dir_all(tmp.join("Desktop")).unwrap();
+        std::fs::write(tmp.join("Desktop").join("file.txt"), "test").unwrap();
+        std::env::set_var("HOME", &tmp);
         let folders = vec!["Desktop".to_string()];
         let result = validate_path("Desktop/file.txt", &folders);
         assert!(result.is_ok());
-        assert_eq!(result.unwrap(), format!("{}/Desktop/file.txt", home));
+        assert_eq!(result.unwrap(), format!("{}/Desktop/file.txt", tmp.to_string_lossy()));
+        std::fs::remove_dir_all(&tmp).ok();
     }
 
     #[test]
     fn test_validate_path_accepts_absolute_sandbox_path() {
-        let home = std::env::var("HOME").unwrap_or_default();
+        // ponytail: use own temp HOME to avoid race with settings tests
+        let tmp = std::env::temp_dir().join(format!("the-maid-abs-test-{}", std::process::id()));
+        std::fs::create_dir_all(tmp.join("Desktop")).unwrap();
+        std::fs::write(tmp.join("Desktop").join("file.txt"), "test").unwrap();
+        std::env::set_var("HOME", &tmp);
         let folders = vec!["Desktop".to_string()];
-        let result = validate_path(&format!("{}/Desktop/file.txt", home), &folders);
+        let result = validate_path(&format!("{}/Desktop/file.txt", tmp.to_string_lossy()), &folders);
         assert!(result.is_ok());
+        std::fs::remove_dir_all(&tmp).ok();
     }
 
     #[test]

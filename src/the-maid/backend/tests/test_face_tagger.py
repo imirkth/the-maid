@@ -6,7 +6,6 @@ import pytest
 import tempfile
 import shutil
 import sqlite3
-import subprocess
 from pathlib import Path
 from unittest.mock import patch, MagicMock
 
@@ -19,6 +18,7 @@ from the_maid.face_tagger import (
     _clear_xmp_tag,
     _path_in_sandbox,
 )
+from the_maid import face_tagger
 from test_face_cluster import _make_embedding, _make_similar_embedding
 
 
@@ -62,17 +62,21 @@ class TestXMPTagWriting:
     @patch("the_maid.face_tagger._exiftool_available", return_value=True)
     @patch("the_maid.face_tagger._file_exists", return_value=True)
     @patch("the_maid.face_tagger._exiftool_path", return_value="/usr/bin/exiftool")
-    @patch("the_maid.face_tagger.subprocess.run")
-    def test_write_xmp_tag_success(self, mock_run, mock_path, mock_exists, mock_avail):
-        mock_run.return_value = MagicMock(returncode=0, stderr="")
+    @patch("the_maid.face_tagger.exiftool.ExifToolHelper")
+    def test_write_xmp_tag_success(self, mock_helper_cls, mock_path, mock_exists, mock_avail):
+        mock_et = MagicMock()
+        mock_et.__enter__ = MagicMock(return_value=mock_et)
+        mock_et.__exit__ = MagicMock(return_value=False)
+        mock_et._last_status = 0
+        mock_et._last_stderr = ""
+        mock_helper_cls.return_value = mock_et
         result = _write_xmp_tag("/fake/path.jpg", "PersonInImage", "Sarah")
         assert result is True
-        mock_run.assert_called_once()
-        args = mock_run.call_args[0][0]
-        assert args[0].endswith("exiftool")
-        assert "-XMP:PersonInImage=Sarah" in args
-        assert "-overwrite_original" in args
-        assert "--" in args
+        mock_et.set_tags.assert_called_once()
+        args, kwargs = mock_et.set_tags.call_args
+        assert args[0] == "/fake/path.jpg"
+        assert kwargs["tags"] == {"XMP:PersonInImage": "Sarah"}
+        assert "-overwrite_original" in kwargs["params"]
 
     @patch("the_maid.face_tagger._exiftool_available", return_value=False)
     def test_write_xmp_tag_no_exiftool(self, mock_avail):
@@ -80,9 +84,15 @@ class TestXMPTagWriting:
         assert result is False
 
     @patch("the_maid.face_tagger._exiftool_available", return_value=True)
-    @patch("the_maid.face_tagger.subprocess.run")
-    def test_write_xmp_tag_failure(self, mock_run, mock_avail):
-        mock_run.return_value = MagicMock(returncode=1)
+    @patch("the_maid.face_tagger._file_exists", return_value=True)
+    @patch("the_maid.face_tagger._exiftool_path", return_value="/usr/bin/exiftool")
+    @patch("the_maid.face_tagger.exiftool.ExifToolHelper")
+    def test_write_xmp_tag_failure(self, mock_helper_cls, mock_path, mock_exists, mock_avail):
+        mock_et = MagicMock()
+        mock_et.__enter__ = MagicMock(return_value=mock_et)
+        mock_et.__exit__ = MagicMock(return_value=False)
+        mock_et.set_tags.side_effect = face_tagger.exiftool.exceptions.ExifToolExecuteError(1, b"", b"error", [])
+        mock_helper_cls.return_value = mock_et
         result = _write_xmp_tag("/fake/path.jpg", "PersonInImage", "Sarah")
         assert result is False
 
@@ -93,46 +103,68 @@ class TestXMPTagWriting:
         assert result is False
 
     @patch("the_maid.face_tagger._exiftool_available", return_value=True)
-    @patch("the_maid.face_tagger.subprocess.run")
-    def test_write_xmp_tag_timeout(self, mock_run, mock_avail):
-        mock_run.side_effect = subprocess.TimeoutExpired(cmd="exiftool", timeout=30)
+    @patch("the_maid.face_tagger._file_exists", return_value=True)
+    @patch("the_maid.face_tagger._exiftool_path", return_value="/usr/bin/exiftool")
+    @patch("the_maid.face_tagger.exiftool.ExifToolHelper")
+    def test_write_xmp_tag_nonzero_status(self, mock_helper_cls, mock_path, mock_exists, mock_avail):
+        """If exiftool returns a non-zero exit status, surface it."""
+        mock_et = MagicMock()
+        mock_et.__enter__ = MagicMock(return_value=mock_et)
+        mock_et.__exit__ = MagicMock(return_value=False)
+        mock_et._last_status = 1
+        mock_et._last_stderr = ""
+        mock_helper_cls.return_value = mock_et
         result = _write_xmp_tag("/fake/path.jpg", "PersonInImage", "Sarah")
         assert result is False
 
     @patch("the_maid.face_tagger._exiftool_available", return_value=True)
     @patch("the_maid.face_tagger._file_exists", return_value=True)
     @patch("the_maid.face_tagger._exiftool_path", return_value="/usr/bin/exiftool")
-    @patch("the_maid.face_tagger.subprocess.run")
-    def test_write_xmp_tag_uses_correct_prefix(self, mock_run, mock_path, mock_exists, mock_avail):
+    @patch("the_maid.face_tagger.exiftool.ExifToolHelper")
+    def test_write_xmp_tag_uses_correct_prefix(self, mock_helper_cls, mock_path, mock_exists, mock_avail):
         """Caller must pass the bare tag name; function prepends the family prefix."""
-        mock_run.return_value = MagicMock(returncode=0)
+        mock_et = MagicMock()
+        mock_et.__enter__ = MagicMock(return_value=mock_et)
+        mock_et.__exit__ = MagicMock(return_value=False)
+        mock_et._last_status = 0
+        mock_et._last_stderr = ""
+        mock_helper_cls.return_value = mock_et
         _write_xmp_tag("/fake/path.jpg", "PersonInImage", "Sarah")
-        args = mock_run.call_args[0][0]
-        tag_args = [a for a in args if "PersonInImage" in a]
-        assert tag_args == ["-XMP:PersonInImage=Sarah"]
+        args, kwargs = mock_et.set_tags.call_args
+        assert kwargs["tags"] == {"XMP:PersonInImage": "Sarah"}
 
     @patch("the_maid.face_tagger._exiftool_available", return_value=True)
     @patch("the_maid.face_tagger._file_exists", return_value=True)
-    @patch("the_maid.face_tagger.subprocess.run")
-    def test_write_xmp_tag_includes_stderr_in_result(self, mock_run, mock_exists, mock_avail):
+    @patch("the_maid.face_tagger._exiftool_path", return_value="/usr/bin/exiftool")
+    @patch("the_maid.face_tagger.exiftool.ExifToolHelper")
+    def test_write_xmp_tag_includes_stderr_in_result(self, mock_helper_cls, mock_path, mock_exists, mock_avail):
         """If exiftool prints a warning/error to stderr, surface it."""
-        mock_run.return_value = MagicMock(returncode=0, stderr="Warning: tag name PersonInImage is not writable")
+        mock_et = MagicMock()
+        mock_et.__enter__ = MagicMock(return_value=mock_et)
+        mock_et.__exit__ = MagicMock(return_value=False)
+        mock_et._last_status = 0
+        mock_et._last_stderr = "Warning: tag name PersonInImage is not writable"
+        mock_helper_cls.return_value = mock_et
         result = _write_xmp_tag("/fake/path.jpg", "PersonInImage", "Sarah")
         assert result is False
 
     @patch("the_maid.face_tagger._exiftool_available", return_value=True)
     @patch("the_maid.face_tagger._file_exists", return_value=True)
     @patch("the_maid.face_tagger._exiftool_path", return_value="/usr/bin/exiftool")
-    @patch("the_maid.face_tagger.subprocess.run")
-    def test_write_xmp_tag_special_chars_in_label(self, mock_run, mock_path, mock_exists, mock_avail):
+    @patch("the_maid.face_tagger.exiftool.ExifToolHelper")
+    def test_write_xmp_tag_special_chars_in_label(self, mock_helper_cls, mock_path, mock_exists, mock_avail):
         """ExifTool-special characters are stripped before invoking the binary."""
-        mock_run.return_value = MagicMock(returncode=0, stderr="")
+        mock_et = MagicMock()
+        mock_et.__enter__ = MagicMock(return_value=mock_et)
+        mock_et.__exit__ = MagicMock(return_value=False)
+        mock_et._last_status = 0
+        mock_et._last_stderr = ""
+        mock_helper_cls.return_value = mock_et
         label = 'Sarah="best" ; friend'
         result = _write_xmp_tag("/fake/path.jpg", "PersonInImage", label)
         assert result is True
-        args = mock_run.call_args[0][0]
-        tag_arg = [a for a in args if a.startswith("-XMP:PersonInImage=")][0]
-        assert tag_arg == '-XMP:PersonInImage=Sarah"best"  friend'
+        args, kwargs = mock_et.set_tags.call_args
+        assert kwargs["tags"] == {"XMP:PersonInImage": 'Sarah"best"  friend'}
 
 
 # ─── rename_cluster_with_tags ───
