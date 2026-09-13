@@ -78,6 +78,20 @@ function shortPath(fullPath: string): string {
   return '…/' + parts.slice(-2).join('/');
 }
 
+function formatNestedPath(name: string): React.ReactNode {
+  const parts = name.split('/');
+  if (parts.length <= 1) return <span>{name}</span>;
+  return (
+    <span style={{ display: 'flex', flexDirection: 'column', lineHeight: 1.4 }}>
+      {parts.map((part, i) => (
+        <span key={i} style={{ paddingLeft: `${i * 14}px` }}>
+          {i === 0 ? '📂' : '📁'} {part}
+        </span>
+      ))}
+    </span>
+  );
+}
+
 function formatSize(bytes: number): string {
   if (bytes < 1024) return `${bytes} B`;
   if (bytes < 1024 * 1024) return `${(bytes / 1024).toFixed(1)} KB`;
@@ -447,6 +461,22 @@ export default function ScanView() {
     finally { setExecuting(false); }
   };
 
+  const handleClearTree = async () => {
+    if (!confirm("Delete the entire categorized tree? This cannot be undone.")) return;
+    setError("");
+    try {
+      await invoke("clear_tree");
+      setTree(null);
+      setExpandedCats(new Set());
+      setExpandedSubs(new Set());
+      setAcceptedCats(new Set());
+      setRefusedCats(new Set());
+      setAcceptedSubs(new Set());
+      setRefusedSubs(new Set());
+      setSelectedFileIds(new Set());
+    } catch (err) { setError(String(err)); }
+  };
+
   const scanDisabled = scanning || !directory || !backendReady || !canScan;
   const allCategoryNames = hasTree ? tree!.tree.map(c => c.name).filter(n => n !== "Uncategorized") : [];
 
@@ -561,6 +591,9 @@ export default function ScanView() {
                 <button className="primary" onClick={approveStructure} disabled={!allCatsDecided} style={{ marginLeft: "12px" }} title={allCatsDecided ? "" : "Accept or refuse all categories first"}>
                   ✓ Approve Tree Structure
                 </button>
+                <button className="secondary" onClick={handleClearTree} style={{ marginLeft: "12px" }}>
+                  🗑 Clear Tree
+                </button>
                 {!allCatsDecided && <span className="muted" style={{ marginLeft: 8 }}>Review all categories first</span>}
               </>
             ) : (
@@ -657,7 +690,7 @@ export default function ScanView() {
                           const allSubSelected = subIds.length > 0 && subIds.every(id => selectedFileIds.has(id));
                           return (
                             <div key={idx} className={`content-tree-subcategory${subStateClass(subKey)}`}>
-                              <div className="content-tree-subcategory-header" onClick={() => toggleSub(subKey)}>
+                              <div className="content-tree-subcategory-header" onClick={() => toggleSub(subKey)} style={{ alignItems: 'flex-start' }}>
                                 <span className="content-tree-toggle">{subExpanded ? "−" : "+"}</span>
                                 <span className="content-tree-icon">📂</span>
                                 {editingSub === subKey ? (
@@ -667,7 +700,7 @@ export default function ScanView() {
                                     style={{ flex: 1, padding: "2px 6px" }} />
                                 ) : (
                                   <span className="content-tree-name" onDoubleClick={(e) => { e.stopPropagation(); startRenameSub(cat.name, child.name!); }}>
-                                    {child.name}
+                                    {formatNestedPath(child.name!)}
                                   </span>
                                 )}
                                 <span className="content-tree-count">{child.count} {child.count === 1 ? "file" : "files"}</span>

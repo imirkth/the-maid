@@ -297,6 +297,7 @@ fn main() {
             commands::edit_subcategory,
             commands::merge_categories,
             commands::bulk_move_files,
+            commands::clear_tree,
         ])
         .build(tauri::generate_context!())
         .expect("error while building The Maid application")
