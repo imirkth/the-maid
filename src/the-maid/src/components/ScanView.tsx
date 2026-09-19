@@ -318,7 +318,7 @@ export default function ScanView() {
     setProgress(0); setScanCount(0); setScanMax(0); setScanElapsed(0); setScanEta(0);
     setError(""); setResults([]); setScanned(false);
     try {
-      const resp: ScanResponse = await invoke("scan_directory", { request: { directory, max_files: 1000 } });
+      const resp: ScanResponse = await invoke("scan_directory", { request: { directory, max_files: 10000 } });
       setResults(resp.files);
       setScanned(true);
       if (resp.errors.length > 0) setError(resp.errors.join("; "));
