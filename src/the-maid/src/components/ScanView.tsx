@@ -72,10 +72,58 @@ interface TreeState {
   total_categorized: number;
 }
 
+interface NestedNode {
+  name: string;
+  fullPath: string;
+  count: number;
+  files?: TreeFile[];
+  children: NestedNode[];
+}
+
 function shortPath(fullPath: string): string {
   const parts = fullPath.split('/');
   if (parts.length <= 3) return fullPath;
   return '…/' + parts.slice(-2).join('/');
+}
+
+type NestedNodeMap = Record<string, NestedNodeBuild>;
+
+interface NestedNodeBuild {
+  name: string;
+  fullPath: string;
+  count: number;
+  files?: TreeFile[];
+  children: NestedNodeMap;
+}
+
+function buildNestedTree(children: TreeChild[]): { nodes: NestedNode[]; directFiles: TreeFile[] } {
+  const directFiles: TreeFile[] = [];
+  const root: NestedNodeMap = {};
+  for (const child of children) {
+    if (child.name && child.files) {
+      const parts = child.name.split('/').filter(p => p);
+      let current = root;
+      let currentPath = '';
+      for (let i = 0; i < parts.length; i++) {
+        const part = parts[i];
+        currentPath = currentPath ? `${currentPath}/${part}` : part;
+        if (!current[part]) {
+          current[part] = { name: part, fullPath: currentPath, count: 0, children: {} };
+        }
+        if (i === parts.length - 1) {
+          current[part].count = child.count ?? 0;
+          current[part].files = child.files;
+        }
+        current = current[part].children;
+      }
+    } else if (child.file_id) {
+      directFiles.push(child as TreeFile);
+    }
+  }
+  function toArray(nodes: NestedNodeMap): NestedNode[] {
+    return Object.values(nodes).map(n => ({ name: n.name, fullPath: n.fullPath, count: n.count, files: n.files, children: toArray(n.children) }));
+  }
+  return { nodes: toArray(root), directFiles };
 }
 
 function formatSize(bytes: number): string {
@@ -411,6 +459,16 @@ export default function ScanView() {
     });
   };
 
+  const selectAllInSubByPath = (ids: string[]) => {
+    const allSelected = ids.length > 0 && ids.every(id => selectedFileIds.has(id));
+    setSelectedFileIds(prev => {
+      const n = new Set(prev);
+      if (allSelected) { ids.forEach(id => n.delete(id)); }
+      else { ids.forEach(id => n.add(id)); }
+      return n;
+    });
+  };
+
   // --- Single file move ---
   const submitMoveFile = async () => {
     if (!movingFileId || !moveTargetCat) return;
@@ -445,6 +503,78 @@ export default function ScanView() {
       setSelectedFileIds(new Set());
     } catch (err) { setError(String(err)); }
     finally { setExecuting(false); }
+  };
+
+  const handleClearTree = async () => {
+    if (!confirm("Delete the entire categorized tree? This cannot be undone.")) return;
+    setError("");
+    try {
+      await invoke("clear_tree");
+      setTree(null);
+      setExpandedCats(new Set());
+      setExpandedSubs(new Set());
+      setAcceptedCats(new Set());
+      setRefusedCats(new Set());
+      setAcceptedSubs(new Set());
+      setRefusedSubs(new Set());
+      setSelectedFileIds(new Set());
+    } catch (err) { setError(String(err)); }
+  };
+
+
+  // ponytail: render a nested subcategory tree (Law > Cryocare > CIMC > ...)
+  const renderNestedNode = (node: NestedNode, catName: string): JSX.Element => {
+    const subKey = `${catName}::${node.fullPath}`;
+    const subExpanded = expandedSubs.has(subKey);
+    const subAccepted = acceptedSubs.has(subKey);
+    const subRefused = refusedSubs.has(subKey);
+    const isLeaf = node.files && node.files.length > 0;
+    const subIds = isLeaf ? node.files!.map(f => f.file_id) : [];
+    const allSubSelected = subIds.length > 0 && subIds.every(id => selectedFileIds.has(id));
+
+    return (
+      <div key={subKey} className={`content-tree-subcategory${subStateClass(subKey)}`}>
+        <div className="content-tree-subcategory-header" onClick={() => toggleSub(subKey)} style={{ alignItems: 'flex-start' }}>
+          <span className="content-tree-toggle">{subExpanded ? "−" : "+"}</span>
+          <span className="content-tree-icon">{isLeaf ? '📂' : '📁'}</span>
+          {editingSub === subKey ? (
+            <input type="text" value={editSubValue} autoFocus onClick={(e) => e.stopPropagation()}
+              onChange={(e) => setEditSubValue(e.target.value)}
+              onKeyDown={(e) => { if (e.key === "Enter") submitRenameSub(catName, node.fullPath); if (e.key === "Escape") setEditingSub(null); }}
+              style={{ flex: 1, padding: "2px 6px" }} />
+          ) : (
+            <span className="content-tree-name" onDoubleClick={(e) => { e.stopPropagation(); startRenameSub(catName, node.fullPath); }}>
+              {node.name}
+            </span>
+          )}
+          <span className="content-tree-count">{node.count} {node.count === 1 ? "file" : "files"}</span>
+
+          {tree!.approved_structure && isLeaf && (
+            <input type="checkbox" checked={allSubSelected} onClick={(e) => e.stopPropagation()} onChange={() => selectAllInSubByPath(subIds)} title="Select all" />
+          )}
+
+          {!tree!.approved_structure && isLeaf && (
+            <>
+              <button className={`cat-accept-btn${subAccepted ? " active" : ""}`} onClick={(e) => { e.stopPropagation(); acceptSub(subKey); }} title="Accept">✓</button>
+              <button className={`cat-refuse-btn${subRefused ? " active" : ""}`} onClick={(e) => { e.stopPropagation(); refuseSub(subKey); }} title="Refuse">✕</button>
+            </>
+          )}
+
+          {!tree!.approved_structure && isLeaf && (
+            <>
+              <button className="cat-edit-btn" onClick={(e) => { e.stopPropagation(); startRenameSub(catName, node.fullPath); }} title="Rename">✏</button>
+              <button className="cat-edit-btn" onClick={(e) => { e.stopPropagation(); deleteSub(catName, node.fullPath); }} title="Delete">🗑</button>
+            </>
+          )}
+        </div>
+        {subExpanded && (
+          <div className="content-tree-children" style={{ marginLeft: 12 }}>
+            {isLeaf && node.files!.map((f) => renderFile(f, catName))}
+            {node.children.map((child) => renderNestedNode(child, catName))}
+          </div>
+        )}
+      </div>
+    );
   };
 
   const scanDisabled = scanning || !directory || !backendReady || !canScan;
@@ -561,6 +691,9 @@ export default function ScanView() {
                 <button className="primary" onClick={approveStructure} disabled={!allCatsDecided} style={{ marginLeft: "12px" }} title={allCatsDecided ? "" : "Accept or refuse all categories first"}>
                   ✓ Approve Tree Structure
                 </button>
+                <button className="secondary" onClick={handleClearTree} style={{ marginLeft: "12px" }}>
+                  🗑 Clear Tree
+                </button>
                 {!allCatsDecided && <span className="muted" style={{ marginLeft: 8 }}>Review all categories first</span>}
               </>
             ) : (
@@ -647,65 +780,15 @@ export default function ScanView() {
 
                   {expanded && (
                     <div className="content-tree-children">
-                      {cat.children.map((child, idx) => {
-                        if (child.name && child.files) {
-                          const subKey = `${cat.name}::${child.name}`;
-                          const subExpanded = expandedSubs.has(subKey);
-                          const subAccepted = acceptedSubs.has(subKey);
-                          const subRefused = refusedSubs.has(subKey);
-                          const subIds = child.files.map(f => f.file_id);
-                          const allSubSelected = subIds.length > 0 && subIds.every(id => selectedFileIds.has(id));
-                          return (
-                            <div key={idx} className={`content-tree-subcategory${subStateClass(subKey)}`}>
-                              <div className="content-tree-subcategory-header" onClick={() => toggleSub(subKey)}>
-                                <span className="content-tree-toggle">{subExpanded ? "−" : "+"}</span>
-                                <span className="content-tree-icon">📂</span>
-                                {editingSub === subKey ? (
-                                  <input type="text" value={editSubValue} autoFocus onClick={(e) => e.stopPropagation()}
-                                    onChange={(e) => setEditSubValue(e.target.value)}
-                                    onKeyDown={(e) => { if (e.key === "Enter") submitRenameSub(cat.name, child.name!); if (e.key === "Escape") setEditingSub(null); }}
-                                    style={{ flex: 1, padding: "2px 6px" }} />
-                                ) : (
-                                  <span className="content-tree-name" onDoubleClick={(e) => { e.stopPropagation(); startRenameSub(cat.name, child.name!); }}>
-                                    {child.name}
-                                  </span>
-                                )}
-                                <span className="content-tree-count">{child.count} {child.count === 1 ? "file" : "files"}</span>
-
-                                {/* Select-all checkbox — after approval */}
-                                {tree!.approved_structure && (
-                                  <input type="checkbox" checked={allSubSelected} onClick={(e) => e.stopPropagation()} onChange={() => selectAllInSub(cat, child.name!)} title="Select all" />
-                                )}
-
-                                {/* Accept / Refuse — pre-approval */}
-                                {!tree!.approved_structure && (
-                                  <>
-                                    <button className={`cat-accept-btn${subAccepted ? " active" : ""}`} onClick={(e) => { e.stopPropagation(); acceptSub(subKey); }} title="Accept">✓</button>
-                                    <button className={`cat-refuse-btn${subRefused ? " active" : ""}`} onClick={(e) => { e.stopPropagation(); refuseSub(subKey); }} title="Refuse">✕</button>
-                                  </>
-                                )}
-
-                                {/* Edit buttons */}
-                                {!tree!.approved_structure && (
-                                  <>
-                                    <button className="cat-edit-btn" onClick={(e) => { e.stopPropagation(); startRenameSub(cat.name, child.name!); }} title="Rename">✏</button>
-                                    <button className="cat-edit-btn" onClick={(e) => { e.stopPropagation(); deleteSub(cat.name, child.name!); }} title="Delete">🗑</button>
-                                  </>
-                                )}
-                              </div>
-                              {subExpanded && (
-                                <div className="content-tree-files">
-                                  {child.files.map((f) => renderFile(f, cat.name))}
-                                </div>
-                              )}
-                            </div>
-                          );
-                        } else {
-                          // Direct file child
-                          const f = child as unknown as TreeFile;
-                          return <div key={idx}>{renderFile(f, cat.name)}</div>;
-                        }
-                      })}
+                      {(() => {
+                        const { nodes, directFiles } = buildNestedTree(cat.children);
+                        return (
+                          <>
+                            {nodes.map((node) => renderNestedNode(node, cat.name))}
+                            {directFiles.map((f) => <div key={f.file_id}>{renderFile(f, cat.name)}</div>)}
+                          </>
+                        );
+                      })()}
                     </div>
                   )}
                 </div>

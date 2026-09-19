@@ -4,8 +4,8 @@
   "version": "0.1.0",
   "identifier": "com.themaid.app",
   "build": {
-    "beforeDevCommand": "cd /home/imirk/.openclaw/workspace-the-maid/src/the-maid/src && npm run dev",
-    "beforeBuildCommand": "cd /home/imirk/.openclaw/workspace-the-maid/src/the-maid/src && npm run build",
+    "beforeDevCommand": "cd /tmp/the-maid-ui-fix/src/the-maid/src && npm run dev",
+    "beforeBuildCommand": "cd /tmp/the-maid-ui-fix/src/the-maid/src && npm run build",
     "frontendDist": "../src/dist",
     "devUrl": "http://localhost:1420"
   },

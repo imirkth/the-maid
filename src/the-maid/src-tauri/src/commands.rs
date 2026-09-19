@@ -1118,6 +1118,19 @@ pub async fn ping_backend(state: State<'_, AppState>) -> Result<(), String> {
     state.sidecar.ping()
 }
 
+#[tauri::command]
+pub async fn clear_tree() -> Result<(), String> {
+    let home = std::env::var("HOME").map_err(|_| "HOME not set")?;
+    let maid_dir = PathBuf::from(home).join(".the-maid");
+    for name in ["tree.json", "category_registry.json"] {
+        let path = maid_dir.join(name);
+        if path.exists() {
+            fs::remove_file(&path).map_err(|e| format!("Failed to remove {}: {}", name, e))?;
+        }
+    }
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

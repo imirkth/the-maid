@@ -87,6 +87,9 @@ class LLMManager:
                 "temperature": temperature,
                 "top_p": 0.9,
                 "num_predict": max_tokens,
+                # Whole-folder-structure prompts are ~2k tokens; ollama's default
+                # num_ctx silently truncates the prompt head — request a real window.
+                "num_ctx": 8192,
             },
         }, timeout=300)
         response.raise_for_status()
@@ -169,8 +172,11 @@ class LLMManager:
         # not split across Photos/Personal/Uncategorized).
         accumulated_tree: List[Dict[str, Any]] = []
 
+        # Whole folder structure of the scan area — every folder, not just this batch's
+        folder_tree = self._folder_tree_overview(scan_root)
+
         if len(indexed) <= MAX_FILES_PER_SUBAGENT:
-            tree = self._classify_batch(indexed, accumulated_tree, scan_root)
+            tree = self._classify_batch(indexed, accumulated_tree, scan_root, folder_tree)
         else:
             # Chunk by MAX_FILES_PER_SUBAGENT, then merge
             sub_trees = []
@@ -179,7 +185,7 @@ class LLMManager:
             _batch_start = _time.monotonic()
             for chunk_idx, chunk_start in enumerate(range(0, len(indexed), MAX_FILES_PER_SUBAGENT)):
                 chunk = indexed[chunk_start:chunk_start + MAX_FILES_PER_SUBAGENT]
-                tree = self._classify_batch(chunk, accumulated_tree, scan_root)
+                tree = self._classify_batch(chunk, accumulated_tree, scan_root, folder_tree)
                 sub_trees.append(tree)
                 # Grow the accumulated tree for the next batch
                 accumulated_tree = self._merge_into_accumulated(accumulated_tree, tree)
@@ -216,7 +222,7 @@ class LLMManager:
 
         return {"tree": reviewed_tree}
 
-    def _classify_batch(self, files: List[Dict[str, Any]], accumulated_tree: Optional[List[Dict[str, Any]]] = None, scan_root: str = "") -> List[Dict[str, Any]]:
+    def _classify_batch(self, files: List[Dict[str, Any]], accumulated_tree: Optional[List[Dict[str, Any]]] = None, scan_root: str = "", folder_tree: str = "") -> List[Dict[str, Any]]:
         """
         Classify a batch of files in a single LLM call.
         The manifest includes folder context so the LLM sees the full directory hierarchy.
@@ -261,7 +267,7 @@ class LLMManager:
             parts = [p for p in rel.split("/") if p]
             if len(parts) > 1:
                 folder_key = "/".join(parts[:-1])
-                f["_subcat"] = parts[-2]  # last folder segment
+                f["_subcat"] = folder_key  # whole folder path — the tree keeps the full structure
                 folder_groups.setdefault(folder_key, []).append(f)
             else:
                 f["_subcat"] = ""
@@ -305,6 +311,14 @@ class LLMManager:
 
         # Step 4: Ask LLM to categorize FOLDERS (not files) + root files
         total_items = folder_idx + len(root_files)
+        # Whole folder structure context — every folder under the scan root,
+        # including ones with no files in this batch (bounded for the small-model context)
+        tree_section = ""
+        if folder_tree:
+            tree_section = f"""
+Folder structure of the whole scanned area (context — includes folders not in this batch):
+{folder_tree}
+"""
         prompt = f"""Pick a category for each folder or file below.
 
 Categories: Photos, Finance, Law, Work, Software, Travel, Personal, Education, Health, Media, Documents, Uncategorized
@@ -317,8 +331,9 @@ Folder rules (look at the folder NAME and sample filenames, not the file extensi
 - Folders with "internal", "ISO", "CICU", "design", "certificate" → Law (compliance/inspection documents)
 - Video folders (Standard Work Videos) → Media
 - Folders with crypto/wallet/blockchain names → Finance
+- KEEP files from the same folder together ONLY when the folder has a clear identity (business, project, person, client, topic). For generic dump folders like "Other", "Misc", "Temp", "Downloads", categorize by content type instead.
 - Use "Uncategorized" only if you truly cannot tell
-
+{tree_section}
 Folders:
 {folder_manifest}
 
@@ -596,22 +611,32 @@ Now categorize all {total_items} items:
         return result
 
     @staticmethod
+    @staticmethod
     def _summarize_tree(tree: List[Dict[str, Any]]) -> str:
         """Compact one-line-per-category summary of the accumulated tree for the LLM prompt.
-        e.g. 'Photos > Eleanor (12 files)\nFinance > Cryptocurrency (3 files)'"""
+        e.g. 'Photos > Eleanor (12 files)\nFinance > Cryptocurrency (3 files)'
+        Bounded: subcategories now carry whole folder paths, so cap names per
+        category and total size to keep the prompt inside the small-model context."""
         lines = []
+        budget = 1500
         for node in tree:
             cat = node.get("category", "")
             count = node.get("count", 0)
             subs = node.get("subbuckets", [])
-            if subs:
-                sub_names = [s.get("subcategory", "") for s in subs if s.get("subcategory")]
-                if sub_names:
-                    lines.append(f"{cat} > {', '.join(sub_names)} ({count} files)")
-                else:
-                    lines.append(f"{cat} ({count} files)")
+            sub_names = [s.get("subcategory", "") for s in subs if s.get("subcategory")]
+            if sub_names:
+                shown = sub_names[:8]
+                line = f"{cat} > {', '.join(shown)}"
+                if len(sub_names) > 8:
+                    line += f" (+{len(sub_names) - 8} more)"
+                line = (line[:237] + "…") if len(line) > 240 else line
+                line += f" ({count} files)"
             else:
-                lines.append(f"{cat} ({count} files)")
+                line = f"{cat} ({count} files)"
+            if sum(len(l) + 1 for l in lines) + len(line) + 1 > budget:
+                lines.append("(+ more categories from previous batches)")
+                break
+            lines.append(line)
         return "\n".join(lines) if lines else ""
 
     def _merge_into_accumulated(self, accumulated: List[Dict[str, Any]], new_tree: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
@@ -666,17 +691,16 @@ Now categorize all {total_items} items:
 
     def _build_tree_from_assignments(self, assignments: List[Tuple[int, str, str]]) -> List[Dict[str, Any]]:
         """Build a hierarchical tree from (file_id, category, subcategory) assignments.
-        Post-processes subcategories: strips full paths to last folder name,
+        Post-processes subcategories: normalizes full nested folder paths (kept whole),
         removes file extensions used as subcategories."""
         # Clean up subcategories
         cleaned = []
         for fid, cat, subcat in assignments:
-            # Strip full nested paths in subcategory: "Cryocare services/CIMC documents/internal ISO #1"
-            # → just "internal ISO #1" (last folder segment)
+            # Keep full nested folder paths whole: "Cryocare services/CIMC documents/internal ISO #1"
+            # stays intact — only normalize whitespace around the "/" separators.
             if '/' in subcat:
                 parts = [p.strip() for p in subcat.split('/') if p.strip()]
-                if parts:
-                    subcat = parts[-1]
+                subcat = '/'.join(parts)
             # Remove file extensions used as subcategory
             if subcat and re.match(r'^\.[a-z0-9]{1,5}$', subcat, re.IGNORECASE):
                 subcat = ""
@@ -703,6 +727,53 @@ Now categorize all {total_items} items:
             })
         tree.sort(key=lambda n: sum(len(s.get("files", [])) for s in n.get("subbuckets", [])), reverse=True)
         return tree
+
+    @staticmethod
+    def _folder_tree_overview(scan_root: str, max_lines: int = 60, max_chars: int = 1800) -> str:
+        """Bounded shallow-first listing of EVERY folder under the scan root.
+        Gives the LLM the whole folder structure as context — including folders
+        with no files in the current batch. Skips hidden and @eaDir dirs; never
+        raises; truncates (with a note) to fit the small-model prompt budget."""
+        if not scan_root:
+            return ""
+        try:
+            root = Path(scan_root).resolve()
+        except Exception:
+            return ""
+        if not root.is_dir():
+            return ""
+        root_str = str(root)
+        collected: List[str] = []
+        chars = 0
+        truncated = False
+        queue: List[str] = [root_str]
+        while queue and not truncated:
+            current = queue.pop(0)
+            try:
+                with os.scandir(current) as it:
+                    children = sorted(
+                        (e for e in it
+                         if e.is_dir(follow_symlinks=False)
+                         and not e.name.startswith('.')
+                         and e.name != '@eaDir'),
+                        key=lambda e: e.name)
+            except OSError:
+                continue
+            for entry in children:
+                rel = entry.path[len(root_str) + 1:] if entry.path.startswith(root_str + "/") else entry.name
+                line = (rel[:117] + "…") if len(rel) > 120 else rel
+                if len(collected) >= max_lines or chars + len(line) + 1 > max_chars:
+                    truncated = True
+                    break
+                collected.append(line)
+                chars += len(line) + 1
+                queue.append(entry.path)
+        if not collected:
+            return ""
+        out = "\n".join(collected)
+        if truncated:
+            out += "\n(+ deeper folders not shown — this batch's folders are listed below with full paths)"
+        return out
 
     def _build_manifest(self, files: List[Dict[str, Any]], scan_root: str = "") -> str:
         """Build a compact text manifest of files for the LLM prompt.
