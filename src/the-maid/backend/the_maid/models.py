@@ -36,7 +36,7 @@ LLM_BASE_URL = os.environ.get("THE_MAID_LLM_BASE_URL", "http://127.0.0.1:11434")
 LLM_MODEL = os.environ.get("THE_MAID_LLM_MODEL", "gemma4:e2b")
 
 # Max files per sub-agent LLM call (context window limit)
-MAX_FILES_PER_SUBAGENT = 50
+MAX_FILES_PER_SUBAGENT = 40
 # Max content preview chars per file (keeps prompt small)
 CONTENT_PREVIEW_CHARS = 150
 # Similarity threshold for merging categories (0-1)
@@ -181,11 +181,12 @@ class LLMManager:
             # Chunk by MAX_FILES_PER_SUBAGENT, then merge
             sub_trees = []
             total_chunks = (len(indexed) + MAX_FILES_PER_SUBAGENT - 1) // MAX_FILES_PER_SUBAGENT
+            folder_registry: Dict[str, str] = {}  # folder_key -> category, locked across batches
             import time as _time
             _batch_start = _time.monotonic()
             for chunk_idx, chunk_start in enumerate(range(0, len(indexed), MAX_FILES_PER_SUBAGENT)):
                 chunk = indexed[chunk_start:chunk_start + MAX_FILES_PER_SUBAGENT]
-                tree = self._classify_batch(chunk, accumulated_tree, scan_root, folder_tree)
+                tree = self._classify_batch(chunk, accumulated_tree, scan_root, folder_tree, folder_registry)
                 sub_trees.append(tree)
                 # Grow the accumulated tree for the next batch
                 accumulated_tree = self._merge_into_accumulated(accumulated_tree, tree)
@@ -222,7 +223,9 @@ class LLMManager:
 
         return {"tree": reviewed_tree}
 
-    def _classify_batch(self, files: List[Dict[str, Any]], accumulated_tree: Optional[List[Dict[str, Any]]] = None, scan_root: str = "", folder_tree: str = "") -> List[Dict[str, Any]]:
+    def _classify_batch(self, files: List[Dict[str, Any]], accumulated_tree: Optional[List[Dict[str, Any]]] = None, scan_root: str = "", folder_tree: str = "", folder_registry: Optional[Dict[str, str]] = None) -> List[Dict[str, Any]]:
+        if folder_registry is None:
+            folder_registry = {}
         """
         Classify a batch of files in a single LLM call.
         The manifest includes folder context so the LLM sees the full directory hierarchy.
@@ -232,6 +235,9 @@ class LLMManager:
         """
         if not files:
             return []
+
+        if folder_registry is None:
+            folder_registry = {}
 
         manifest = self._build_manifest(files, scan_root)
         file_count = len(files)
@@ -268,7 +274,9 @@ class LLMManager:
             if len(parts) > 1:
                 folder_key = "/".join(parts[:-1])
                 f["_subcat"] = folder_key  # whole folder path — the tree keeps the full structure
-                folder_groups.setdefault(folder_key, []).append(f)
+                # Skip folders already locked to a category from a previous batch
+                if folder_key not in folder_registry:
+                    folder_groups.setdefault(folder_key, []).append(f)
             else:
                 f["_subcat"] = ""
                 root_files.append(f)
@@ -332,6 +340,8 @@ Folder rules (look at the folder NAME and sample filenames, not the file extensi
 - Video folders (Standard Work Videos) → Media
 - Folders with crypto/wallet/blockchain names → Finance
 - KEEP files from the same folder together ONLY when the folder has a clear identity (business, project, person, client, topic). For generic dump folders like "Other", "Misc", "Temp", "Downloads", categorize by content type instead.
+- HARD RULE: a folder must have ONE category across the whole scan. If a folder name appears in multiple batches, use the same category every time. Do not split a project/business/person folder across categories.
+- HARD RULE: "PyCharmProjects", "Projects", "Workspace", "src", "code" folders → Software. Do not put them under Law or Photos.
 - Use "Uncategorized" only if you truly cannot tell
 {tree_section}
 Folders:
@@ -369,6 +379,9 @@ Now categorize all {total_items} items:
                 if item_id in folder_id_map:
                     folder_key = folder_id_map[item_id]
                     folder_categories[folder_key] = cat
+                    # Lock folder -> category for cross-batch consistency
+                    if len(cat) <= 50 and '/' not in cat and '|' not in cat:
+                        folder_registry[folder_key] = cat
                 elif item_id in root_id_map:
                     fid = root_id_map[item_id]
                     folder_categories[f"__root_{fid}"] = cat
@@ -386,6 +399,10 @@ Now categorize all {total_items} items:
 
                 if folder_key and folder_key in folder_categories:
                     cat = folder_categories[folder_key]
+                    subcat = f.get("_subcat", "")
+                elif folder_key and folder_key in folder_registry:
+                    # Folder was categorized in a previous batch — lock it there
+                    cat = folder_registry[folder_key]
                     subcat = f.get("_subcat", "")
                 elif f"__root_{fid}" in folder_categories:
                     cat = folder_categories[f"__root_{fid}"]
