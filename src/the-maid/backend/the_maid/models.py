@@ -181,12 +181,11 @@ class LLMManager:
             # Chunk by MAX_FILES_PER_SUBAGENT, then merge
             sub_trees = []
             total_chunks = (len(indexed) + MAX_FILES_PER_SUBAGENT - 1) // MAX_FILES_PER_SUBAGENT
-            folder_registry: Dict[str, str] = {}  # folder_key -> category, locked across batches
             import time as _time
             _batch_start = _time.monotonic()
             for chunk_idx, chunk_start in enumerate(range(0, len(indexed), MAX_FILES_PER_SUBAGENT)):
                 chunk = indexed[chunk_start:chunk_start + MAX_FILES_PER_SUBAGENT]
-                tree = self._classify_batch(chunk, accumulated_tree, scan_root, folder_tree, folder_registry)
+                tree = self._classify_batch(chunk, accumulated_tree, scan_root, folder_tree)
                 sub_trees.append(tree)
                 # Grow the accumulated tree for the next batch
                 accumulated_tree = self._merge_into_accumulated(accumulated_tree, tree)
@@ -211,9 +210,6 @@ class LLMManager:
             # Final tree is the accumulated tree (already merged incrementally)
             tree = accumulated_tree if len(sub_trees) > 1 else sub_trees[0]
 
-        # Fix code folders that were misclassified into Photos by the LLM
-        tree = self._fix_code_folders(tree, indexed)
-
         # Photo sub-clustering: split large photo folders by year/month
         tree = self._subcluster_photos(tree, indexed)
 
@@ -226,9 +222,7 @@ class LLMManager:
 
         return {"tree": reviewed_tree}
 
-    def _classify_batch(self, files: List[Dict[str, Any]], accumulated_tree: Optional[List[Dict[str, Any]]] = None, scan_root: str = "", folder_tree: str = "", folder_registry: Optional[Dict[str, str]] = None) -> List[Dict[str, Any]]:
-        if folder_registry is None:
-            folder_registry = {}
+    def _classify_batch(self, files: List[Dict[str, Any]], accumulated_tree: Optional[List[Dict[str, Any]]] = None, scan_root: str = "", folder_tree: str = "") -> List[Dict[str, Any]]:
         """
         Classify a batch of files in a single LLM call.
         The manifest includes folder context so the LLM sees the full directory hierarchy.
@@ -238,9 +232,6 @@ class LLMManager:
         """
         if not files:
             return []
-
-        if folder_registry is None:
-            folder_registry = {}
 
         manifest = self._build_manifest(files, scan_root)
         file_count = len(files)
@@ -277,9 +268,7 @@ class LLMManager:
             if len(parts) > 1:
                 folder_key = "/".join(parts[:-1])
                 f["_subcat"] = folder_key  # whole folder path — the tree keeps the full structure
-                # Skip folders already locked to a category from a previous batch
-                if folder_key not in folder_registry:
-                    folder_groups.setdefault(folder_key, []).append(f)
+                folder_groups.setdefault(folder_key, []).append(f)
             else:
                 f["_subcat"] = ""
                 root_files.append(f)
@@ -288,19 +277,54 @@ class LLMManager:
         folder_lines = []
         folder_idx = 0
         folder_id_map = {}  # llm_id -> folder_key
+        MAX_FOLDER_MANIFEST_CHARS = 2000  # keep small-model prompts bounded
         for folder_key, folder_files in sorted(folder_groups.items(), key=lambda x: -len(x[1])):
-            sample_file = folder_files[0]
-            sample_path = sample_file.get("path", "").replace(scan_root + "/", "") if scan_root else sample_file.get("path", "")
             exts = set()
             for ff in folder_files:
                 p = ff.get("path", "")
                 if "." in p:
                     exts.add(p.rsplit(".", 1)[-1].lower())
             ext_str = ", ".join(sorted(exts)[:5])
-            # Show up to 3 sample filenames so LLM can understand what the folder contains
-            sample_names = [ff.get("path", "").split("/")[-1][:40] for ff in folder_files[:3]]
-            samples_str = "; ".join(sample_names)
-            folder_lines.append(f"{folder_idx}: {folder_key} ({len(folder_files)} files, types: {ext_str}) samples: {samples_str}")
+
+            # Build rich file list: all filenames + short text snippets where useful
+            file_entries = []
+            for ff in folder_files:
+                fname = ff.get("path", "").split("/")[-1][:60]
+                fpath = ff.get("path", "")
+                text = ""
+                if fpath:
+                    ext = fpath.rsplit(".", 1)[-1].lower() if "." in fpath else ""
+                    # Extract text snippets for document/code/text files
+                    if ext in {
+                        'txt', 'md', 'markdown', 'py', 'js', 'ts', 'jsx', 'tsx',
+                        'java', 'c', 'cpp', 'h', 'hpp', 'go', 'rs', 'rb', 'php',
+                        'swift', 'kt', 'cs', 'sh', 'bash', 'json', 'xml', 'yaml',
+                        'yml', 'toml', 'ini', 'cfg', 'conf', 'sql', 'html', 'css',
+                        'scss', 'sass', 'less', 'vue', 'svelte', 'pl', 'pm', 'r',
+                        'jl', 'groovy', 'gradle', 'dockerfile', 'gitignore',
+                        'ipynb', 'rmd', 'asm', 's', 'v', 'sv', 'vhdl', 'vhd',
+                    }:
+                        raw = extract_text(fpath, max_chars=120) or ""
+                        if raw:
+                            text = f" | {raw[:120].replace(chr(10), ' ').replace(chr(13), ' ')}"
+                file_entries.append(f"- {fname}{text}")
+
+            # Truncate if the folder manifest would exceed the budget
+            header = f"{folder_idx}: {folder_key} ({len(folder_files)} files, types: {ext_str})"
+            body = "\n".join(file_entries)
+            full = f"{header}\n{body}"
+            if len(full) > MAX_FOLDER_MANIFEST_CHARS:
+                # Keep truncating file entries until it fits
+                kept = file_entries[:1]
+                while len(file_entries) > 1 and len(header) + 1 + len("\n".join(kept)) < MAX_FOLDER_MANIFEST_CHARS * 0.7:
+                    kept.append(file_entries[len(kept)])
+                    if len(kept) >= len(file_entries):
+                        break
+                body = "\n".join(kept)
+                omitted = len(file_entries) - len(kept)
+                full = f"{header}\n{body}\n... ({omitted} more files omitted for length)"
+
+            folder_lines.append(full)
             folder_id_map[folder_idx] = folder_key
             folder_idx += 1
         folder_manifest = "\n".join(folder_lines)
@@ -343,8 +367,6 @@ Folder rules (look at the folder NAME and sample filenames, not the file extensi
 - Video folders (Standard Work Videos) → Media
 - Folders with crypto/wallet/blockchain names → Finance
 - KEEP files from the same folder together ONLY when the folder has a clear identity (business, project, person, client, topic). For generic dump folders like "Other", "Misc", "Temp", "Downloads", categorize by content type instead.
-- HARD RULE: a folder must have ONE category across the whole scan. If a folder name appears in multiple batches, use the same category every time. Do not split a project/business/person folder across categories.
-- HARD RULE: "PyCharmProjects", "Projects", "Workspace", "src", "code" folders → Software. Do not put them under Law or Photos.
 - Use "Uncategorized" only if you truly cannot tell
 {tree_section}
 Folders:
@@ -382,9 +404,6 @@ Now categorize all {total_items} items:
                 if item_id in folder_id_map:
                     folder_key = folder_id_map[item_id]
                     folder_categories[folder_key] = cat
-                    # Lock folder -> category for cross-batch consistency
-                    if len(cat) <= 50 and '/' not in cat and '|' not in cat:
-                        folder_registry[folder_key] = cat
                 elif item_id in root_id_map:
                     fid = root_id_map[item_id]
                     folder_categories[f"__root_{fid}"] = cat
@@ -402,10 +421,6 @@ Now categorize all {total_items} items:
 
                 if folder_key and folder_key in folder_categories:
                     cat = folder_categories[folder_key]
-                    subcat = f.get("_subcat", "")
-                elif folder_key and folder_key in folder_registry:
-                    # Folder was categorized in a previous batch — lock it there
-                    cat = folder_registry[folder_key]
                     subcat = f.get("_subcat", "")
                 elif f"__root_{fid}" in folder_categories:
                     cat = folder_categories[f"__root_{fid}"]
@@ -447,112 +462,6 @@ Now categorize all {total_items} items:
 
         # Fallback to extension rules
         return self._fallback_tree(files).get("tree", [])
-
-    def _fix_code_folders(self, tree: List[Dict[str, Any]], indexed: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
-        """Post-process tree to move code-heavy folders out of Photos.
-
-        The small LLM sometimes misclassifies project folders (PyCharmProjects, src, code)
-        as Photos on first sight, especially when the folder name resembles a person name
-        or contains mixed media. This step detects those folders by name or by code-file
-        density and moves them to Software before photo sub-clustering runs.
-        """
-        if not indexed or not tree:
-            return tree
-
-        id_to_file = {f.get("id", i): f for i, f in enumerate(indexed)}
-
-        CODE_EXTENSIONS = {
-            'py', 'js', 'ts', 'jsx', 'tsx', 'java', 'cpp', 'c', 'h', 'hpp',
-            'go', 'rs', 'rb', 'php', 'swift', 'kt', 'cs', 'm', 'mm', 'scala',
-            'clj', 'ex', 'exs', 'erl', 'lua', 'sh', 'bash', 'zsh', 'fish',
-            'ps1', 'bat', 'cmd', 'vbs', 'sql', 'html', 'css', 'scss', 'sass',
-            'less', 'vue', 'svelte', 'pl', 'pm', 'r', 'jl', 'groovy', 'gradle',
-            'xml', 'json', 'yaml', 'yml', 'toml', 'ini', 'cfg', 'conf',
-            'dockerfile', 'gitignore', 'gitattributes', 'md', 'markdown',
-            'ipynb', 'rmd', 'asm', 's', 'v', 'sv', 'vhdl', 'vhd',
-        }
-        CODE_FOLDER_PATTERNS = [
-            'pycharmprojects', 'pycharm', 'projects', 'project', 'workspace',
-            'workspaces', 'src', 'source', 'sources', 'code', 'coding',
-            'repos', 'repositories', 'github', 'gitlab', 'bitbucket', 'dev',
-            'development', 'develop', 'programming', 'scripts', 'app', 'apps',
-            'application', 'applications', 'backend', 'frontend', 'api',
-            'webapp', 'website', 'tools', 'utils', 'utilities', 'lib',
-            'libs', 'library', 'libraries', 'package', 'packages', 'sdk',
-            'framework', 'frameworks', 'module', 'modules', 'component',
-            'components', 'service', 'services', 'microservice', 'microservices',
-            'bot', 'bots', 'automation', 'automations', 'plugin', 'plugins',
-            'extension', 'extensions', 'addon', 'addons', 'integration',
-            'integrations', 'test', 'tests', 'testing', 'unittest', 'spec',
-            'specs', 'benchmark', 'benchmarks', 'perf', 'performance',
-            'build', 'builds', 'dist', 'release', 'releases', 'deploy',
-            'deployment', 'ci', 'cd', 'pipeline', 'pipelines', 'infra',
-            'infrastructure', 'terraform', 'ansible', 'puppet', 'chef',
-            'kubernetes', 'k8s', 'docker', 'compose', 'vagrant', 'vm',
-            'virtualenv', 'venv', 'env', 'environment', 'conda', 'pip',
-            'node_modules', 'vendor', 'third_party', 'thirdparty', 'deps',
-            'dependencies', 'bower_components', 'jspm_packages',
-        ]
-
-        def _is_code_folder(subbucket: Dict[str, Any]) -> bool:
-            name = (subbucket.get("subcategory", "") or "").lower()
-            if any(pattern in name for pattern in CODE_FOLDER_PATTERNS):
-                return True
-            files = subbucket.get("files", [])
-            if not files:
-                return False
-            code_count = 0
-            total_count = 0
-            for fid in files:
-                f = id_to_file.get(fid, {})
-                path = f.get("path", "")
-                ext = path.rsplit(".", 1)[-1].lower() if "." in path else ""
-                if ext:
-                    total_count += 1
-                    if ext in CODE_EXTENSIONS:
-                        code_count += 1
-            return total_count > 0 and (code_count / total_count) >= 0.4
-
-        photos_node = None
-        software_node = None
-        for node in tree:
-            cat = node.get("category", "")
-            if cat.lower() == "photos":
-                photos_node = node
-            elif cat.lower() == "software":
-                software_node = node
-
-        if not photos_node:
-            return tree
-
-        if not software_node:
-            software_node = {
-                "category": "Software",
-                "subbuckets": [],
-                "rationale": "Code and development projects",
-                "count": 0,
-            }
-            tree.append(software_node)
-
-        moved: List[Dict[str, Any]] = []
-        remaining: List[Dict[str, Any]] = []
-        for sub in photos_node.get("subbuckets", []):
-            if _is_code_folder(sub):
-                software_node.setdefault("subbuckets", []).append(sub)
-                moved.append(sub)
-            else:
-                remaining.append(sub)
-
-        if moved:
-            photos_node["subbuckets"] = remaining
-            moved_names = [s.get("subcategory", "") for s in moved if s.get("subcategory")]
-            photos_node["count"] = sum(len(s.get("files", [])) for s in remaining)
-            software_node["count"] = sum(len(s.get("files", [])) for s in software_node.get("subbuckets", []))
-            software_node["rationale"] = f"Software projects and code (auto-moved from Photos: {', '.join(moved_names[:5])})"
-            software_node["subbuckets"].sort(key=lambda s: (s.get("subcategory", "") == "", s.get("subcategory", "")))
-            tree.sort(key=lambda n: sum(len(s.get("files", [])) for s in n.get("subbuckets", [])), reverse=True)
-
-        return tree
 
     @staticmethod
     def _parse_photo_date(f: Dict[str, Any]) -> Optional[str]:
