@@ -211,6 +211,9 @@ class LLMManager:
             # Final tree is the accumulated tree (already merged incrementally)
             tree = accumulated_tree if len(sub_trees) > 1 else sub_trees[0]
 
+        # Fix code folders that were misclassified into Photos by the LLM
+        tree = self._fix_code_folders(tree, indexed)
+
         # Photo sub-clustering: split large photo folders by year/month
         tree = self._subcluster_photos(tree, indexed)
 
@@ -444,6 +447,112 @@ Now categorize all {total_items} items:
 
         # Fallback to extension rules
         return self._fallback_tree(files).get("tree", [])
+
+    def _fix_code_folders(self, tree: List[Dict[str, Any]], indexed: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+        """Post-process tree to move code-heavy folders out of Photos.
+
+        The small LLM sometimes misclassifies project folders (PyCharmProjects, src, code)
+        as Photos on first sight, especially when the folder name resembles a person name
+        or contains mixed media. This step detects those folders by name or by code-file
+        density and moves them to Software before photo sub-clustering runs.
+        """
+        if not indexed or not tree:
+            return tree
+
+        id_to_file = {f.get("id", i): f for i, f in enumerate(indexed)}
+
+        CODE_EXTENSIONS = {
+            'py', 'js', 'ts', 'jsx', 'tsx', 'java', 'cpp', 'c', 'h', 'hpp',
+            'go', 'rs', 'rb', 'php', 'swift', 'kt', 'cs', 'm', 'mm', 'scala',
+            'clj', 'ex', 'exs', 'erl', 'lua', 'sh', 'bash', 'zsh', 'fish',
+            'ps1', 'bat', 'cmd', 'vbs', 'sql', 'html', 'css', 'scss', 'sass',
+            'less', 'vue', 'svelte', 'pl', 'pm', 'r', 'jl', 'groovy', 'gradle',
+            'xml', 'json', 'yaml', 'yml', 'toml', 'ini', 'cfg', 'conf',
+            'dockerfile', 'gitignore', 'gitattributes', 'md', 'markdown',
+            'ipynb', 'rmd', 'asm', 's', 'v', 'sv', 'vhdl', 'vhd',
+        }
+        CODE_FOLDER_PATTERNS = [
+            'pycharmprojects', 'pycharm', 'projects', 'project', 'workspace',
+            'workspaces', 'src', 'source', 'sources', 'code', 'coding',
+            'repos', 'repositories', 'github', 'gitlab', 'bitbucket', 'dev',
+            'development', 'develop', 'programming', 'scripts', 'app', 'apps',
+            'application', 'applications', 'backend', 'frontend', 'api',
+            'webapp', 'website', 'tools', 'utils', 'utilities', 'lib',
+            'libs', 'library', 'libraries', 'package', 'packages', 'sdk',
+            'framework', 'frameworks', 'module', 'modules', 'component',
+            'components', 'service', 'services', 'microservice', 'microservices',
+            'bot', 'bots', 'automation', 'automations', 'plugin', 'plugins',
+            'extension', 'extensions', 'addon', 'addons', 'integration',
+            'integrations', 'test', 'tests', 'testing', 'unittest', 'spec',
+            'specs', 'benchmark', 'benchmarks', 'perf', 'performance',
+            'build', 'builds', 'dist', 'release', 'releases', 'deploy',
+            'deployment', 'ci', 'cd', 'pipeline', 'pipelines', 'infra',
+            'infrastructure', 'terraform', 'ansible', 'puppet', 'chef',
+            'kubernetes', 'k8s', 'docker', 'compose', 'vagrant', 'vm',
+            'virtualenv', 'venv', 'env', 'environment', 'conda', 'pip',
+            'node_modules', 'vendor', 'third_party', 'thirdparty', 'deps',
+            'dependencies', 'bower_components', 'jspm_packages',
+        ]
+
+        def _is_code_folder(subbucket: Dict[str, Any]) -> bool:
+            name = (subbucket.get("subcategory", "") or "").lower()
+            if any(pattern in name for pattern in CODE_FOLDER_PATTERNS):
+                return True
+            files = subbucket.get("files", [])
+            if not files:
+                return False
+            code_count = 0
+            total_count = 0
+            for fid in files:
+                f = id_to_file.get(fid, {})
+                path = f.get("path", "")
+                ext = path.rsplit(".", 1)[-1].lower() if "." in path else ""
+                if ext:
+                    total_count += 1
+                    if ext in CODE_EXTENSIONS:
+                        code_count += 1
+            return total_count > 0 and (code_count / total_count) >= 0.4
+
+        photos_node = None
+        software_node = None
+        for node in tree:
+            cat = node.get("category", "")
+            if cat.lower() == "photos":
+                photos_node = node
+            elif cat.lower() == "software":
+                software_node = node
+
+        if not photos_node:
+            return tree
+
+        if not software_node:
+            software_node = {
+                "category": "Software",
+                "subbuckets": [],
+                "rationale": "Code and development projects",
+                "count": 0,
+            }
+            tree.append(software_node)
+
+        moved: List[Dict[str, Any]] = []
+        remaining: List[Dict[str, Any]] = []
+        for sub in photos_node.get("subbuckets", []):
+            if _is_code_folder(sub):
+                software_node.setdefault("subbuckets", []).append(sub)
+                moved.append(sub)
+            else:
+                remaining.append(sub)
+
+        if moved:
+            photos_node["subbuckets"] = remaining
+            moved_names = [s.get("subcategory", "") for s in moved if s.get("subcategory")]
+            photos_node["count"] = sum(len(s.get("files", [])) for s in remaining)
+            software_node["count"] = sum(len(s.get("files", [])) for s in software_node.get("subbuckets", []))
+            software_node["rationale"] = f"Software projects and code (auto-moved from Photos: {', '.join(moved_names[:5])})"
+            software_node["subbuckets"].sort(key=lambda s: (s.get("subcategory", "") == "", s.get("subcategory", "")))
+            tree.sort(key=lambda n: sum(len(s.get("files", [])) for s in n.get("subbuckets", [])), reverse=True)
+
+        return tree
 
     @staticmethod
     def _parse_photo_date(f: Dict[str, Any]) -> Optional[str]:
