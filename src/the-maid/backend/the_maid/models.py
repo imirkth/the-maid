@@ -253,6 +253,26 @@ class LLMManager:
         # Keep it short, explicit, and impossible to get wrong.
         prev_cats = tree_hint + registry_hint
 
+        # Pre-classify obvious project/code folders before asking the LLM.
+        # The small LLM still misclassifies PyCharmProjects/Projects/src/code as
+        # Photos on first sight, so we short-circuit it here.
+        PROJECT_FOLDER_PATTERNS = {
+            'pycharmprojects', 'pycharm', 'projects', 'project', 'workspace',
+            'workspaces', 'src', 'source', 'sources', 'code', 'coding',
+            'repos', 'repositories', 'github', 'gitlab', 'bitbucket', 'dev',
+            'development', 'develop', 'programming', 'scripts', 'ide',
+            'intellij', 'vscode', 'eclipse', 'netbeans',
+        }
+        for f in files:
+            path = f.get("path", "")
+            rel = path.replace(scan_root + "/", "") if scan_root else path
+            parts = [p for p in rel.split("/") if p]
+            if len(parts) > 1:
+                folder_key = "/".join(parts[:-1])
+                folder_lower = folder_key.lower()
+                if any(pattern in folder_lower for pattern in PROJECT_FOLDER_PATTERNS):
+                    folder_registry[folder_key] = "Software"
+
         # ── Folder-first categorization ──
         # With only ~13 unique folders, pre-compute category per folder, not per file.
         # The LLM only picks categories for folders + root files (maybe 20 items total).
