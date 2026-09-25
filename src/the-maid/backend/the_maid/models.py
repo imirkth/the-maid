@@ -36,7 +36,7 @@ LLM_BASE_URL = os.environ.get("THE_MAID_LLM_BASE_URL", "http://127.0.0.1:11434")
 LLM_MODEL = os.environ.get("THE_MAID_LLM_MODEL", "gemma4:e2b")
 
 # Max files per sub-agent LLM call (context window limit)
-MAX_FILES_PER_SUBAGENT = 50
+MAX_FILES_PER_SUBAGENT = 40
 # Max content preview chars per file (keeps prompt small)
 CONTENT_PREVIEW_CHARS = 150
 # Similarity threshold for merging categories (0-1)
@@ -253,6 +253,26 @@ class LLMManager:
         # Keep it short, explicit, and impossible to get wrong.
         prev_cats = tree_hint + registry_hint
 
+        # Pre-classify obvious project/code folders before asking the LLM.
+        # The small LLM still misclassifies PyCharmProjects/Projects/src/code as
+        # Photos on first sight, so we short-circuit it here.
+        PROJECT_FOLDER_PATTERNS = {
+            'pycharmprojects', 'pycharm', 'projects', 'project', 'workspace',
+            'workspaces', 'src', 'source', 'sources', 'code', 'coding',
+            'repos', 'repositories', 'github', 'gitlab', 'bitbucket', 'dev',
+            'development', 'develop', 'programming', 'scripts', 'ide',
+            'intellij', 'vscode', 'eclipse', 'netbeans',
+        }
+        for f in files:
+            path = f.get("path", "")
+            rel = path.replace(scan_root + "/", "") if scan_root else path
+            parts = [p for p in rel.split("/") if p]
+            if len(parts) > 1:
+                folder_key = "/".join(parts[:-1])
+                folder_lower = folder_key.lower()
+                if any(pattern in folder_lower for pattern in PROJECT_FOLDER_PATTERNS):
+                    folder_registry[folder_key] = "Software"
+
         # ── Folder-first categorization ──
         # With only ~13 unique folders, pre-compute category per folder, not per file.
         # The LLM only picks categories for folders + root files (maybe 20 items total).
@@ -277,19 +297,54 @@ class LLMManager:
         folder_lines = []
         folder_idx = 0
         folder_id_map = {}  # llm_id -> folder_key
+        MAX_FOLDER_MANIFEST_CHARS = 2000  # keep small-model prompts bounded
         for folder_key, folder_files in sorted(folder_groups.items(), key=lambda x: -len(x[1])):
-            sample_file = folder_files[0]
-            sample_path = sample_file.get("path", "").replace(scan_root + "/", "") if scan_root else sample_file.get("path", "")
             exts = set()
             for ff in folder_files:
                 p = ff.get("path", "")
                 if "." in p:
                     exts.add(p.rsplit(".", 1)[-1].lower())
             ext_str = ", ".join(sorted(exts)[:5])
-            # Show up to 3 sample filenames so LLM can understand what the folder contains
-            sample_names = [ff.get("path", "").split("/")[-1][:40] for ff in folder_files[:3]]
-            samples_str = "; ".join(sample_names)
-            folder_lines.append(f"{folder_idx}: {folder_key} ({len(folder_files)} files, types: {ext_str}) samples: {samples_str}")
+
+            # Build rich file list: all filenames + short text snippets where useful
+            file_entries = []
+            for ff in folder_files:
+                fname = ff.get("path", "").split("/")[-1][:60]
+                fpath = ff.get("path", "")
+                text = ""
+                if fpath:
+                    ext = fpath.rsplit(".", 1)[-1].lower() if "." in fpath else ""
+                    # Extract text snippets for document/code/text files
+                    if ext in {
+                        'txt', 'md', 'markdown', 'py', 'js', 'ts', 'jsx', 'tsx',
+                        'java', 'c', 'cpp', 'h', 'hpp', 'go', 'rs', 'rb', 'php',
+                        'swift', 'kt', 'cs', 'sh', 'bash', 'json', 'xml', 'yaml',
+                        'yml', 'toml', 'ini', 'cfg', 'conf', 'sql', 'html', 'css',
+                        'scss', 'sass', 'less', 'vue', 'svelte', 'pl', 'pm', 'r',
+                        'jl', 'groovy', 'gradle', 'dockerfile', 'gitignore',
+                        'ipynb', 'rmd', 'asm', 's', 'v', 'sv', 'vhdl', 'vhd',
+                    }:
+                        raw = extract_text(fpath, max_chars=120) or ""
+                        if raw:
+                            text = f" | {raw[:120].replace(chr(10), ' ').replace(chr(13), ' ')}"
+                file_entries.append(f"- {fname}{text}")
+
+            # Truncate if the folder manifest would exceed the budget
+            header = f"{folder_idx}: {folder_key} ({len(folder_files)} files, types: {ext_str})"
+            body = "\n".join(file_entries)
+            full = f"{header}\n{body}"
+            if len(full) > MAX_FOLDER_MANIFEST_CHARS:
+                # Keep truncating file entries until it fits
+                kept = file_entries[:1]
+                while len(file_entries) > 1 and len(header) + 1 + len("\n".join(kept)) < MAX_FOLDER_MANIFEST_CHARS * 0.7:
+                    kept.append(file_entries[len(kept)])
+                    if len(kept) >= len(file_entries):
+                        break
+                body = "\n".join(kept)
+                omitted = len(file_entries) - len(kept)
+                full = f"{header}\n{body}\n... ({omitted} more files omitted for length)"
+
+            folder_lines.append(full)
             folder_id_map[folder_idx] = folder_key
             folder_idx += 1
         folder_manifest = "\n".join(folder_lines)
