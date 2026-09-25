@@ -222,14 +222,17 @@ class LLMManager:
 
         return {"tree": reviewed_tree}
 
-    def _classify_batch(self, files: List[Dict[str, Any]], accumulated_tree: Optional[List[Dict[str, Any]]] = None, scan_root: str = "", folder_tree: str = "") -> List[Dict[str, Any]]:
+    def _classify_batch(self, files: List[Dict[str, Any]], accumulated_tree: Optional[List[Dict[str, Any]]] = None, scan_root: str = "", folder_tree: str = "", folder_registry: Optional[Dict[str, str]] = None) -> List[Dict[str, Any]]:
         """
         Classify a batch of files in a single LLM call.
         The manifest includes folder context so the LLM sees the full directory hierarchy.
         If accumulated_tree is provided, the LLM also sees categories from previous batches
         and is instructed to reuse them for consistency.
+        folder_registry locks folder_key -> category across batches.
         Returns a tree: [{"category": ..., "subbuckets": [{"subcategory": ..., "files": [...]}], "rationale": ...}]
         """
+        if folder_registry is None:
+            folder_registry = {}
         if not files:
             return []
 
@@ -252,6 +255,26 @@ class LLMManager:
         # Long prompts confuse small models — they echo paths instead of outputting categories.
         # Keep it short, explicit, and impossible to get wrong.
         prev_cats = tree_hint + registry_hint
+
+        # Pre-classify obvious project/code folders before asking the LLM.
+        # The small LLM still misclassifies PyCharmProjects/Projects/src/code as
+        # Photos on first sight, so we short-circuit it here.
+        PROJECT_FOLDER_PATTERNS = {
+            'pycharmprojects', 'pycharm', 'projects', 'project', 'workspace',
+            'workspaces', 'src', 'source', 'sources', 'code', 'coding',
+            'repos', 'repositories', 'github', 'gitlab', 'bitbucket', 'dev',
+            'development', 'develop', 'programming', 'scripts', 'ide',
+            'intellij', 'vscode', 'eclipse', 'netbeans',
+        }
+        for f in files:
+            path = f.get("path", "")
+            rel = path.replace(scan_root + "/", "") if scan_root else path
+            parts = [p for p in rel.split("/") if p]
+            if len(parts) > 1:
+                folder_key = "/".join(parts[:-1])
+                folder_lower = folder_key.lower()
+                if any(pattern in folder_lower for pattern in PROJECT_FOLDER_PATTERNS):
+                    folder_registry[folder_key] = "Software"
 
         # ── Folder-first categorization ──
         # With only ~13 unique folders, pre-compute category per folder, not per file.
