@@ -36,7 +36,7 @@ LLM_BASE_URL = os.environ.get("THE_MAID_LLM_BASE_URL", "http://127.0.0.1:11434")
 LLM_MODEL = os.environ.get("THE_MAID_LLM_MODEL", "gemma4:e2b")
 
 # Max files per sub-agent LLM call (context window limit)
-MAX_FILES_PER_SUBAGENT = 40
+MAX_FILES_PER_SUBAGENT = 50
 # Max content preview chars per file (keeps prompt small)
 CONTENT_PREVIEW_CHARS = 150
 # Similarity threshold for merging categories (0-1)
