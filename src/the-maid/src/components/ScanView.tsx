@@ -56,13 +56,33 @@ interface TreeChild {
 interface TreeCategory {
   name: string;
   count: number;
+  rationale?: string;
   children: TreeChild[];
+}
+
+// Before/after structure comparison returned by the tree architect
+interface StructureStats {
+  folders: number;
+  max_depth: number;
+  loose_files: number;
+  single_file_folders: number;
+  top_level?: number;
+}
+
+interface TreeSummary {
+  files?: number;
+  before?: StructureStats;
+  after?: StructureStats;
+  to_sort?: number;
+  kept_folders?: number;
+  llm_named?: boolean;
 }
 
 interface CategorizeResponse {
   categories: TreeCategory[];
   total_files: number;
   total_categorized: number;
+  summary?: TreeSummary;
 }
 
 interface TreeState {
@@ -70,14 +90,21 @@ interface TreeState {
   approved_structure: boolean;
   total_files: number;
   total_categorized: number;
+  summary?: TreeSummary;
 }
 
 interface NestedNode {
   name: string;
   fullPath: string;
   count: number;
+  rationale?: string;
   files?: TreeFile[];
   children: NestedNode[];
+}
+
+// Folders whose files are left where they are (nothing to approve)
+function isHoldingCategory(name: string): boolean {
+  return name === "Uncategorized" || name === "To Sort";
 }
 
 function shortPath(fullPath: string): string {
@@ -92,6 +119,7 @@ interface NestedNodeBuild {
   name: string;
   fullPath: string;
   count: number;
+  rationale?: string;
   files?: TreeFile[];
   children: NestedNodeMap;
 }
@@ -113,6 +141,7 @@ function buildNestedTree(children: TreeChild[]): { nodes: NestedNode[]; directFi
         if (i === parts.length - 1) {
           current[part].count = child.count ?? 0;
           current[part].files = child.files;
+          current[part].rationale = child.rationale ?? child.files[0]?.rationale;
         }
         current = current[part].children;
       }
@@ -121,7 +150,12 @@ function buildNestedTree(children: TreeChild[]): { nodes: NestedNode[]; directFi
     }
   }
   function toArray(nodes: NestedNodeMap): NestedNode[] {
-    return Object.values(nodes).map(n => ({ name: n.name, fullPath: n.fullPath, count: n.count, files: n.files, children: toArray(n.children) }));
+    return Object.values(nodes).map(n => {
+      const kids = toArray(n.children);
+      // Intermediate folders (e.g. "Photos/2023") count the files below them
+      const count = n.count + kids.reduce((sum, k) => sum + k.count, 0);
+      return { name: n.name, fullPath: n.fullPath, count, rationale: n.rationale, files: n.files, children: kids };
+    });
   }
   return { nodes: toArray(root), directFiles };
 }
@@ -412,7 +446,7 @@ export default function ScanView() {
 
   // All categories must have a decision before approving
   const allCatsDecided = hasTree ? tree!.tree.every(c =>
-    c.name === "Uncategorized" || acceptedCats.has(c.name) || refusedCats.has(c.name)
+    isHoldingCategory(c.name) || acceptedCats.has(c.name) || refusedCats.has(c.name)
   ) : false;
 
   // --- Approve structure (move refused to Uncategorized first) ---
@@ -569,6 +603,7 @@ export default function ScanView() {
         </div>
         {subExpanded && (
           <div className="content-tree-children" style={{ marginLeft: 12 }}>
+            {node.rationale && <div className="content-tree-why">💡 {node.rationale}</div>}
             {isLeaf && node.files!.map((f) => renderFile(f, catName))}
             {node.children.map((child) => renderNestedNode(child, catName))}
           </div>
@@ -582,7 +617,7 @@ export default function ScanView() {
 
   // --- Render helpers ---
   const catStateClass = (name: string): string => {
-    if (name === "Uncategorized") return "";
+    if (isHoldingCategory(name)) return "";
     if (acceptedCats.has(name)) return " tree-accepted";
     if (refusedCats.has(name)) return " tree-refused";
     return " tree-pending";
@@ -686,6 +721,16 @@ export default function ScanView() {
               <strong>{tree!.total_categorized}</strong> of <strong>{tree!.total_files}</strong> files categorized
               {tree!.approved_structure && <span className="badge-approved"> ✓ Tree approved</span>}
             </p>
+            {tree!.summary?.before && tree!.summary?.after && (
+              <p className="tree-design-summary">
+                Proposed tree: <strong>{tree!.summary.after.top_level ?? "?"}</strong> top folders,{" "}
+                <strong>{tree!.summary.after.folders}</strong> folders, max depth <strong>{tree!.summary.after.max_depth}</strong>
+                {" "}(today: {tree!.summary.before.folders} folders, depth {tree!.summary.before.max_depth}
+                {tree!.summary.before.loose_files > 0 && <>, {tree!.summary.before.loose_files} loose files</>}).
+                {(tree!.summary.kept_folders ?? 0) > 0 && <> I kept {tree!.summary.kept_folders} of your own folders intact.</>}
+                {(tree!.summary.to_sort ?? 0) > 0 && <> {tree!.summary.to_sort} files had too little signal and wait in “To Sort”.</>}
+              </p>
+            )}
             {!tree!.approved_structure ? (
               <>
                 <button className="primary" onClick={approveStructure} disabled={!allCatsDecided} style={{ marginLeft: "12px" }} title={allCatsDecided ? "" : "Accept or refuse all categories first"}>
@@ -725,7 +770,7 @@ export default function ScanView() {
           <div className="content-tree">
             {tree!.tree.map((cat) => {
               const expanded = expandedCats.has(cat.name);
-              const isUncategorized = cat.name === "Uncategorized";
+              const isUncategorized = isHoldingCategory(cat.name);
               const isAccepted = acceptedCats.has(cat.name);
               const isRefused = refusedCats.has(cat.name);
               return (
@@ -739,7 +784,7 @@ export default function ScanView() {
                         onKeyDown={(e) => { if (e.key === "Enter") submitRenameCat(); if (e.key === "Escape") setEditingCat(null); }}
                         style={{ flex: 1, padding: "2px 6px" }} />
                     ) : (
-                      <span className="content-tree-name" onDoubleClick={(e) => { e.stopPropagation(); if (!isUncategorized) startRenameCat(cat.name); }}>
+                      <span className="content-tree-name" title={cat.rationale || ""} onDoubleClick={(e) => { e.stopPropagation(); if (!isUncategorized) startRenameCat(cat.name); }}>
                         {cat.name}
                       </span>
                     )}

@@ -22,6 +22,9 @@ PDF_EXTENSIONS: Set[str] = {".pdf"}
 # .docx extension (optional support via python-docx)
 DOCX_EXTENSIONS: Set[str] = {".docx"}
 
+# .xlsx extension (optional support via openpyxl): sheet names + first rows
+XLSX_EXTENSIONS: Set[str] = {".xlsx", ".xlsm"}
+
 
 def extract_text(file_path: str, max_chars: int = 2000) -> str:
     """Extract readable text from a file for LLM categorization.
@@ -41,6 +44,8 @@ def extract_text(file_path: str, max_chars: int = 2000) -> str:
             return _extract_pdf_text(path, max_chars)
         elif ext in DOCX_EXTENSIONS:
             return _extract_docx_text(path, max_chars)
+        elif ext in XLSX_EXTENSIONS:
+            return _extract_xlsx_text(path, max_chars)
         else:
             return ""
     except Exception:
@@ -100,3 +105,31 @@ def _extract_docx_text(path: Path, max_chars: int) -> str:
         total += len(text)
 
     return "\n".join(text_parts)
+
+
+def _extract_xlsx_text(path: Path, max_chars: int) -> str:
+    """Sheet names and the first rows of each sheet (headers carry the subject)."""
+    try:
+        import openpyxl
+    except ImportError:
+        return ""
+
+    wb = openpyxl.load_workbook(str(path), read_only=True, data_only=True)
+    parts: list[str] = []
+    total = 0
+    try:
+        for ws in wb.worksheets:
+            parts.append(ws.title)
+            for row in ws.iter_rows(max_row=15, values_only=True):
+                cells = [str(c) for c in row if isinstance(c, str) and c.strip()]
+                if cells:
+                    line = " ".join(cells)
+                    parts.append(line)
+                    total += len(line)
+                if total >= max_chars:
+                    break
+            if total >= max_chars:
+                break
+    finally:
+        wb.close()
+    return "\n".join(parts)[:max_chars]
