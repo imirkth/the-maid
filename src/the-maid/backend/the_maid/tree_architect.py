@@ -43,11 +43,12 @@ import os
 import re
 import unicodedata
 from collections import Counter, defaultdict
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from datetime import datetime
 from typing import Any, Callable, Dict, Iterable, List, Optional, Tuple
 
 from .extractor import extract_text
+from .preferences import Preferences
 
 # ---------------------------------------------------------------------------
 # Tunables
@@ -70,6 +71,7 @@ EVENT_MIN_PHOTOS = 4          # smaller events fold into "<month> other"
 ROUTE_MIN_SIMILARITY = 0.12
 
 TO_SORT = "To Sort"
+SUGGESTED_AREAS = ["Work", "Personal", "Family", "Finance & Admin", "Studies", "Projects", "Hobbies"]
 
 # ---------------------------------------------------------------------------
 # File kinds
@@ -650,19 +652,68 @@ def name_siblings(nodes: List[Node], parent: Optional[Node], namer: Optional[Cal
 # Topic branch
 # ---------------------------------------------------------------------------
 
-def build_topic_nodes(units: List[Unit], namer, parent: Optional[Node], depth: int) -> List[Node]:
+def build_topic_nodes(units: List[Unit], namer, parent: Optional[Node], depth: int,
+                      max_depth: int = 1) -> List[Node]:
     max_k = TOP_LEVEL_MAX_TOPICS if depth == 0 else SUB_MAX_TOPICS
     groups = cluster_units(units, max_k)
     nodes = [Node(name="", units=g, centroid=_centroid(u.vec for u in g)) for g in groups]
     if depth == 0 or len(nodes) > 1:
         name_siblings(nodes, parent, namer)
     for node in nodes:
-        if depth < 1 and node.file_count() >= SPLIT_MIN_FILES and len(node.units) >= SPLIT_MIN_UNITS:
-            subs = build_topic_nodes(node.units, namer, node, depth + 1)
+        if depth < max_depth and node.file_count() >= SPLIT_MIN_FILES and len(node.units) >= SPLIT_MIN_UNITS:
+            subs = build_topic_nodes(node.units, namer, node, depth + 1, max_depth)
             if len(subs) > 1:
                 node.children = subs
                 node.units = []
     return nodes
+
+
+def assign_areas(nodes: List[Node], areas: List[str],
+                 namer: Optional[Callable[[str], str]]) -> Dict[int, str]:
+    """Put top-level subject folders under the user's main areas (Work, Family...).
+    The LLM decides when available; otherwise words shared between the area
+    name and the folder decide. Folders matching no area stay at the top."""
+    if not areas or not nodes:
+        return {}
+    out: Dict[int, str] = {}
+    for i, n in enumerate(nodes):           # a folder already named like an area
+        for a in areas:
+            if n.name.lower() == a.lower():
+                out[i] = a
+    if namer:
+        letters = "ABCDEFGH"
+        prompt = (
+            "Someone organises their computer into these main areas:\n"
+            + "\n".join(f"{letters[j]}: {a}" for j, a in enumerate(areas))
+            + "\n\nFor each folder below, answer with the letter of the area it belongs to, "
+            "or 'none' if it fits none of them.\n\n"
+            + "\n".join(f"{i}: {n.name} — {n.rationale[:120]}" for i, n in enumerate(nodes))
+            + "\n\nAnswer one line per folder, like:\n0: A\n1: none\n"
+        )
+        try:
+            text = namer(prompt) or ""
+        except Exception as e:  # pragma: no cover
+            print(f"[Architect] area assignment failed: {e}", flush=True)
+            text = ""
+        for line in text.splitlines():
+            m = re.match(r"^\s*(\d+)\s*[:.)-]\s*([A-Ha-h])\b", line)
+            if m:
+                i, j = int(m.group(1)), letters.index(m.group(2).upper())
+                if 0 <= i < len(nodes) and j < len(areas) and i not in out:
+                    out[i] = areas[j]
+    for i, n in enumerate(nodes):
+        if i in out:
+            continue
+        name_terms = set(tokenize(n.name))
+        best, best_s = None, 0.0
+        for a in areas:
+            terms = tokenize(a)
+            score = sum(n.centroid.get(t, 0.0) for t in terms) + (0.5 if name_terms & set(terms) else 0.0)
+            if score > best_s:
+                best, best_s = a, score
+        if best and best_s >= 0.05:
+            out[i] = best
+    return out
 
 
 # ---------------------------------------------------------------------------
@@ -756,8 +807,10 @@ class Placement:
 
 class TreeArchitect:
     def __init__(self, scan_root: str = "", namer: Optional[Callable[[str], str]] = None,
-                 read_content: Optional[Callable[[str], str]] = None):
+                 read_content: Optional[Callable[[str], str]] = None,
+                 prefs: Optional[Preferences] = None):
         self.scan_root = scan_root
+        self.prefs = prefs or Preferences()
         self.namer = namer
         self.read_content = read_content
         self.idf: Dict[str, float] = {}
@@ -767,7 +820,86 @@ class TreeArchitect:
     def build(self, files: List[Dict[str, Any]]) -> Dict[str, Any]:
         if not files:
             return {"tree": [], "summary": {}, "model": {}}
-        profiles = self._profile_all(files)
+        return self._build_from_profiles(self._profile_all(files), files)
+
+    def preview_choices(self, files: List[Dict[str, Any]]) -> Dict[str, Any]:
+        """The preference check: a few questions, each option previewed with what
+        the user's OWN files would look like. Builds the tree a handful of times
+        from one profiling pass, without LLM calls (keyword names are fine for a
+        preview)."""
+        if not files:
+            return {"questions": [], "suggested_areas": [], "protect_candidates": [], "preferences": self.prefs.to_dict()}
+        profiles = self._profile_all(files, progress=False)
+        base_prefs, namer = self.prefs, self.namer
+        self.namer = None
+        try:
+            def variant(**changes) -> List[Dict[str, Any]]:
+                self.prefs = replace(base_prefs, **changes)
+                return self._build_from_profiles(profiles, files)["tree"]
+
+            base = variant()
+            questions = []
+
+            fixed = {"Photos", "Videos", "Music", "Software & Archives", TO_SORT}
+            topics = [n for n in base if n["category"] not in fixed]
+            if topics:
+                biggest = max(topics, key=lambda n: n["count"])["category"]
+                opts = []
+                for value, label in (("auto", "Just by subject"), ("year", "By year"), ("type", "By file type")):
+                    tree = variant(inside_topics=value, areas=[])
+                    node = next((n for n in tree if n["category"] == biggest), None)
+                    opts.append({"value": value, "label": label, "preview": _preview_lines(node, 6)})
+                questions.append({
+                    "id": "inside_topics",
+                    "question": f"Inside a subject folder like “{biggest}”, how should files be arranged?",
+                    "options": opts,
+                })
+
+            n_photos = sum(1 for p in profiles if p.kind == "photo" and not p.is_screenshot)
+            if n_photos >= 10:
+                opts = []
+                for value, label in (("events", "By trip or event"), ("months", "By year and month")):
+                    node = next((n for n in variant(photos=value) if n["category"] == "Photos"), None)
+                    opts.append({"value": value, "label": label, "preview": _preview_lines(node, 6, skip=("Albums", "Screenshots"))})
+                questions.append({"id": "photos", "question": f"How should your {n_photos} photos be organised?", "options": opts})
+
+            opts = []
+            for value, label in (("shallow", "Simple: few levels"), ("detailed", "Detailed: more sub-folders")):
+                tree = variant(depth=value)
+                folders = {"/".join([n["category"]] + s["subcategory"].split("/")[:i])
+                           for n in tree for s in n["subbuckets"]
+                           for i in range(len([x for x in s["subcategory"].split("/") if x]) + 1)}
+                opts.append({"value": value, "label": label,
+                             "preview": [f"{len(tree)} top folders, {len(folders)} folders in total"]
+                                        + [f"{n['category']} ({n['count']})" for n in tree[:5]]})
+            questions.append({"id": "depth", "question": "How deep should the tree go?", "options": opts})
+
+            kept = [u for u in build_units(profiles) if u.name]
+            kept.sort(key=lambda u: -u.size)
+            candidates = [{
+                "path": os.path.join(self.scan_root, *u.base_dirs) if self.scan_root else "/".join(u.base_dirs),
+                "name": "/".join(u.base_dirs),
+                "files": u.size,
+            } for u in kept[:12]]
+            # Only ask what makes a visible difference for THESE files
+            questions = [q for q in questions
+                         if len({tuple(o["preview"]) for o in q["options"]}) > 1]
+            return {
+                "questions": questions,
+                "suggested_areas": SUGGESTED_AREAS,
+                "protect_candidates": candidates,
+                "preferences": base_prefs.to_dict(),
+            }
+        finally:
+            self.prefs, self.namer = base_prefs, namer
+
+    def _build_from_profiles(self, all_profiles: List[FileProfile], files: List[Dict[str, Any]]) -> Dict[str, Any]:
+        self.idf, self.leaf_profiles = {}, []
+        prefs = self.prefs
+        profiles = [p for p in all_profiles if not prefs.is_protected(p.path)]
+        protected = len(all_profiles) - len(profiles)
+        if not profiles:
+            return {"tree": [], "summary": {"files": 0, "protected": protected}, "model": self.model()}
         units = build_units(profiles)
 
         media_units, audio_units, software_units, topic_units = [], [], [], []
@@ -795,9 +927,14 @@ class TreeArchitect:
                 name_siblings([n], None, self.namer)
                 top_nodes = [n]
             else:
-                top_nodes = build_topic_nodes(signal, self.namer, None, 0)
-        for node in top_nodes:
-            self._place_topic(node, [], placements)
+                top_nodes = build_topic_nodes(signal, self.namer, None, 0,
+                                              max_depth=0 if prefs.depth == "shallow" else 1)
+        areas = assign_areas(top_nodes, prefs.areas, self.namer)
+        for i, node in enumerate(top_nodes):
+            area = areas.get(i)
+            if area and area.lower() == node.name.lower():
+                node.name, area = area, None          # the folder IS the area
+            self._place_topic(node, [area] if area else [], placements)
 
         self._place_media(media_units, placements)
         self._place_audio(audio_units, placements)
@@ -806,9 +943,11 @@ class TreeArchitect:
 
         tree = self._to_legacy(placements, files)
         summary = self._summary(profiles, placements)
+        summary["protected"] = protected
+        summary["preferences"] = prefs.to_dict()
         return {"tree": tree, "summary": summary, "model": self.model()}
 
-    def _profile_all(self, files: List[Dict[str, Any]]) -> List[FileProfile]:
+    def _profile_all(self, files: List[Dict[str, Any]], progress: bool = True) -> List[FileProfile]:
         """Profile every file, emitting the categorize_progress events the UI shows."""
         import time
         start = time.monotonic()
@@ -817,7 +956,7 @@ class TreeArchitect:
         for i, f in enumerate(files):
             profiles.append(profile_file(i, f, self.scan_root, self.read_content))
             done = i + 1
-            if done % 100 == 0 or done == total:
+            if progress and (done % 100 == 0 or done == total):
                 elapsed = time.monotonic() - start
                 print(json.dumps({
                     "event": "categorize_progress",
@@ -831,7 +970,8 @@ class TreeArchitect:
 
     def model(self) -> Dict[str, Any]:
         top_idf = dict(sorted(self.idf.items(), key=lambda kv: kv[1])[:8000])
-        return {"version": 1, "idf": top_idf, "leaves": self.leaf_profiles}
+        return {"version": 1, "idf": top_idf, "leaves": self.leaf_profiles,
+                "preferences": self.prefs.to_dict()}
 
     # -- placement ----------------------------------------------------------
     def _place_units(self, units: List[Unit], path: List[str], rationale: str,
@@ -856,15 +996,22 @@ class TreeArchitect:
             "path": "/".join(path),
             "centroid": {k: round(v, 4) for k, v in _top(node.centroid, 30).items()},
         })
-        # Many loose files of different kinds in one folder → light kind split
         loose = [u for u in node.units if not u.name]
         kinds = Counter(u.kind for u in loose)
-        split_kinds = len(loose) >= 30 and len(kinds) > 1
+        years = Counter(u.files[0].date.strftime("%Y") if u.files[0].date else "Undated" for u in loose)
+        style = self.prefs.inside_topics
         for u in node.units:
-            if not u.name and split_kinds and kinds[u.kind] >= 8:
-                self._place_units([u], path + [KIND_LABEL.get(u.kind, "Other files")], node.rationale, placements)
-            else:
-                self._place_units([u], path, node.rationale, placements)
+            sub: List[str] = []
+            if not u.name:
+                if style == "year" and len(years) > 1:
+                    f = u.files[0]
+                    sub = [f.date.strftime("%Y") if f.date else "Undated"]
+                elif style == "type" and len(kinds) > 1:
+                    sub = [KIND_LABEL.get(u.kind, "Other files")]
+                elif style == "auto" and len(loose) >= 30 and len(kinds) > 1 and kinds[u.kind] >= 8:
+                    # many loose files of different kinds in one folder → light kind split
+                    sub = [KIND_LABEL.get(u.kind, "Other files")]
+            self._place_units([u], path + sub, node.rationale, placements)
 
     def _place_media(self, units: List[Unit], placements: List[Placement]) -> None:
         if not units:
@@ -890,8 +1037,22 @@ class TreeArchitect:
     def _place_events(self, items: List[FileProfile], top: str, placements: List[Placement]) -> None:
         if not items:
             return
+        if self.prefs.photos == "months":
+            months: Dict[str, List[FileProfile]] = defaultdict(list)
+            for f in items:
+                if f.date:
+                    months[f.date.strftime("%Y-%m")].append(f)
+            nested = self.prefs.depth != "shallow" and len({m[:4] for m in months}) > 1
+            for month, fs in sorted(months.items()):
+                path = [top, month[:4], month] if nested else [top, month]
+                for f in fs:
+                    placements.append(Placement(f.id, path, f"{top} from {month}, filed by month"))
+            for f in items:
+                if not f.date:
+                    placements.append(Placement(f.id, [top, "Undated"], "No date found in EXIF or filename"))
+            return
         events = build_events(items)
-        years = {y for y, _, _ in events}
+        years = {y for y, _, _ in events} if self.prefs.depth != "shallow" else set()
         for year, label, files in events:
             src = Counter(f.date_source for f in files).most_common(1)[0][0]
             why = f"{len(files)} {top.lower()} taken {label} (dates from {src})"
@@ -982,6 +1143,19 @@ class TreeArchitect:
         }
 
 
+def _preview_lines(node: Optional[Dict[str, Any]], n: int, skip: Tuple[str, ...] = ()) -> List[str]:
+    """'Category/sub (count)' lines for a preview, biggest first."""
+    if not node:
+        return []
+    subs = [s for s in node["subbuckets"] if not any(s["subcategory"].startswith(x) for x in skip)]
+    subs.sort(key=lambda s: -len(s["files"]))
+    lines = [f"{node['category']}/{s['subcategory']} ({len(s['files'])})" if s["subcategory"]
+             else f"{node['category']} ({len(s['files'])} files directly inside)" for s in subs[:n]]
+    if len(subs) > n:
+        lines.append(f"… and {len(subs) - n} more")
+    return lines
+
+
 # ---------------------------------------------------------------------------
 # Routing new files into an existing tree ("keep it live")
 # ---------------------------------------------------------------------------
@@ -992,6 +1166,7 @@ class TreeRouter:
     def __init__(self, model: Dict[str, Any]):
         self.idf = model.get("idf", {}) or {}
         self.leaves = model.get("leaves", []) or []
+        self.prefs = Preferences.from_dict(model.get("preferences"))
 
     def route(self, f: Dict[str, Any], scan_root: str = "") -> Dict[str, Any]:
         p = profile_file(0, f, scan_root)
@@ -999,7 +1174,9 @@ class TreeRouter:
             if p.is_screenshot:
                 return {"path": f"Photos/Screenshots/{p.date.year if p.date else 'Undated'}", "confidence": 0.9,
                         "rationale": "Screenshot"}
-            when = p.date.strftime("%Y") if p.date else "Undated"
+            fmt = "%Y/%Y-%m" if self.prefs.photos == "months" and self.prefs.depth != "shallow" else (
+                "%Y-%m" if self.prefs.photos == "months" else "%Y")
+            when = p.date.strftime(fmt) if p.date else "Undated"
             return {"path": f"Photos/{when}", "confidence": 0.7, "rationale": "Photo, filed by date"}
         if p.kind == "video":
             return {"path": f"Videos/{p.date.strftime('%Y') if p.date else 'Undated'}", "confidence": 0.7,
