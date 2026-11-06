@@ -19,6 +19,7 @@ from typing import Optional, Dict, Any, List
 
 from .registry import CategoryRegistry
 from .preferences import Preferences
+from .feedback import Feedback
 from .tree_architect import TreeArchitect, save_model
 
 # LLM server configuration — set by Rust sidecar via env vars
@@ -122,6 +123,7 @@ class LLMManager:
         sandbox_folders: Optional[list[str]] = None,
         scan_root: str = "",
         prefs: Optional[Preferences] = None,
+        feedback: Optional[Feedback] = None,
     ) -> Dict[str, Any]:
         """
         Design a folder tree for ``files``.
@@ -131,7 +133,8 @@ class LLMManager:
         """
         if not files:
             return {"tree": [], "summary": {}}
-        architect = TreeArchitect(scan_root, namer=self._namer if self._loaded else None, prefs=prefs)
+        architect = TreeArchitect(scan_root, namer=self._namer if self._loaded else None, prefs=prefs,
+                                  feedback=feedback)
         result = architect.build(files)
         save_model(result["model"])
         try:
