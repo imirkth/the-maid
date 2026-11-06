@@ -67,27 +67,39 @@ function App() {
     return <div className="app"><div className="content app-loading"><span className="spinner" /> Loading…</div></div>;
   }
 
-  const nav: { view: View; label: string; icon: IconName; hint: string }[] = [
-    { view: "scan", label: "Organize", icon: "broom", hint: "Scan a folder and shape its tree" },
-    { view: "approval", label: "Review", icon: "listCheck", hint: "Approve suggested moves" },
+  type NavItem = { view: View; label: string; icon: IconName; hint: string };
+  const main: NavItem[] = [
+    { view: "scan", label: "Organize", icon: "broom", hint: "Tidy your folders" },
+  ];
+  // Less common tools stay out of the way until you need them
+  const more: NavItem[] = [
+    { view: "approval", label: "Review", icon: "listCheck", hint: "Approve suggested moves one by one" },
     { view: "buckets", label: "Buckets", icon: "inbox", hint: "Your destination folders" },
     { view: "faces", label: "Faces", icon: "users", hint: "Group photos by person" },
-    { view: "settings", label: "Settings", icon: "settings", hint: "Folders, models and about" },
   ];
+  const navButton = (n: NavItem) => (
+    <button key={n.view} type="button" title={n.hint} onClick={() => setCurrentView(n.view)}
+      className={currentView === n.view ? "active" : ""} aria-current={currentView === n.view ? "page" : undefined}>
+      <Icon name={n.icon} size={17} /> {n.label}
+    </button>
+  );
+  const inMore = more.some((n) => n.view === currentView);
 
   return (
     <div className="app">
       {!isFirstRun && (
         <nav className="sidebar" aria-label="Main">
           <div className="logo"><span className="logo-mark"><Icon name="broom" size={18} /></span> The Maid</div>
-          {nav.map((n) => (
-            <button key={n.view} type="button" title={n.hint} onClick={() => setCurrentView(n.view)}
-              className={currentView === n.view ? "active" : ""} aria-current={currentView === n.view ? "page" : undefined}>
-              <Icon name={n.icon} size={17} /> {n.label}
-            </button>
-          ))}
-          <div className={`backend-status${backendReady ? " ready" : ""}`} title={backendReady ? "The local engine is running" : "The local engine is starting or stopped"}>
-            <span className="status-dot" /> {backendReady ? "Ready" : "Starting…"}
+          {main.map(navButton)}
+          <details className="nav-more" open={inMore || undefined}>
+            <summary><Icon name="chevronRight" size={13} className="nav-more-chev" /> More tools</summary>
+            {more.map(navButton)}
+          </details>
+          <div className="sidebar-foot">
+            {navButton({ view: "settings", label: "Settings", icon: "settings", hint: "Folders, models and about" })}
+            <div className={`backend-status${backendReady ? " ready" : ""}`} title={backendReady ? "The local engine is running" : "The local engine is starting or stopped"}>
+              <span className="status-dot" /> {backendReady ? "Ready" : "Starting…"}
+            </div>
           </div>
         </nav>
       )}

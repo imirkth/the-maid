@@ -93,7 +93,14 @@ function folderName(path: string): string {
   return path.split(/[\\/]/).filter(Boolean).pop() || path;
 }
 
-const STEPS = ["Scan a folder", "Shape your tree", "Move your files"];
+const STEPS = ["Find your files", "Shape your tree", "Move your files"];
+
+interface Batch { directory: string; files: FileMeta[] }
+
+function listNames(names: string[]): string {
+  if (names.length <= 1) return names[0] ?? "";
+  return `${names.slice(0, -1).join(", ")} and ${names[names.length - 1]}`;
+}
 
 function Stepper({ step }: { step: number }) {
   return (
@@ -129,7 +136,8 @@ export default function ScanView() {
   const [scanCount, setScanCount] = useState(0);
   const [scanElapsed, setScanElapsed] = useState(0);
   const [scanEta, setScanEta] = useState(0);
-  const [results, setResults] = useState<FileMeta[]>([]);
+  const [batches, setBatches] = useState<Batch[]>([]); // new files, per scanned folder
+  const [phaseLabel, setPhaseLabel] = useState("");   // which folder is being looked at
   const [error, setError] = useState("");
   const [backendReady, setBackendReady] = useState(false);
   const [scanned, setScanned] = useState(false);
@@ -220,35 +228,57 @@ export default function ScanView() {
     };
   }, []);
 
-  const handleScan = async () => {
-    if (!directory || !canScan) return;
-    setScanning(true);
-    setProgress(0); setScanCount(0); setScanElapsed(0); setScanEta(0);
-    setError(""); setResults([]); setScanned(false); setExecuteResults(null);
-    try {
-      const resp: ScanResponse = await invoke("scan_directory", { request: { directory, max_files: 10000 } });
-      setResults(resp.files);
-      setScanned(true);
-      if (resp.errors.length > 0) setError(resp.errors.join("; "));
-    } catch (err) { setError(String(err)); }
-    finally { setScanning(false); }
-  };
+  const results = batches.flatMap((b) => b.files);
+  const folders = settings?.sandbox_folders ?? [];
 
-  const handleCategorize = async () => {
-    if (results.length === 0) return;
+  // Build the tree folder by folder, so each folder is tidied in place
+  const buildTree = async (todo: Batch[]) => {
+    const work = todo.filter((b) => b.files.length > 0);
+    if (work.length === 0) return;
+    const total = work.reduce((n, b) => n + b.files.length, 0);
     setCategorizing(true); setCategorizeProgress(0); setCatFilesDone(0);
-    setCatFilesTotal(results.length); setCatBatch(0); setCatTotalBatches(0);
+    setCatFilesTotal(total); setCatBatch(0); setCatTotalBatches(0);
     setCatElapsed(0); setCatEta(0); setError("");
     try {
-      const resp: CategorizeResponse = await invoke("categorize_files", { files: results, directory });
-      const merged = await invoke<TreeState>("merge_tree", {
-        categories: resp.categories, totalFiles: resp.total_files, totalCategorized: resp.total_categorized,
-      });
-      setTree(merged);
-      setTreeKey((k) => k + 1);
-      setResults([]);
+      let merged: TreeState | null = null;
+      for (const [i, b] of work.entries()) {
+        setPhaseLabel(work.length > 1 ? `${folderName(b.directory)} (${i + 1} of ${work.length})` : folderName(b.directory));
+        const resp: CategorizeResponse = await invoke("categorize_files", { files: b.files, directory: b.directory });
+        merged = await invoke<TreeState>("merge_tree", {
+          categories: resp.categories, totalFiles: resp.total_files, totalCategorized: resp.total_categorized,
+        });
+      }
+      if (merged) { setTree(merged); setTreeKey((k) => k + 1); }
+      setBatches([]);
     } catch (err) { setError(String(err)); }
-    finally { setCategorizing(false); }
+    finally { setCategorizing(false); setPhaseLabel(""); }
+  };
+
+  // The one button: look through the chosen folders, then build the tree straight away
+  const tidy = async (targets: string[]) => {
+    if (targets.length === 0 || !canScan) return;
+    setScanning(true); setError(""); setBatches([]); setScanned(false); setExecuteResults(null);
+    const found: Batch[] = [];
+    const errors: string[] = [];
+    try {
+      for (const [i, dir] of targets.entries()) {
+        setDirectory(dir);
+        setPhaseLabel(targets.length > 1 ? `${folderName(dir)} (${i + 1} of ${targets.length})` : folderName(dir));
+        setProgress(0); setScanCount(0); setScanElapsed(0); setScanEta(0);
+        try {
+          const resp: ScanResponse = await invoke("scan_directory", { request: { directory: dir, max_files: 10000 } });
+          found.push({ directory: dir, files: resp.files });
+          errors.push(...resp.errors);
+        } catch (err) { errors.push(`${folderName(dir)}: ${String(err)}`); }
+      }
+    } finally { setScanning(false); setPhaseLabel(""); }
+    setScanned(true);
+    if (errors.length > 0) setError(errors.join("; "));
+    setBatches(found);
+    if (found.some((b) => b.files.length > 0)) {
+      if (prefsAnswered) await buildTree(found);
+      else setShowPrefCheck(true); // asked once, before the very first tree
+    }
   };
 
   const toggleExcluded = (id: string) => {
@@ -325,15 +355,23 @@ export default function ScanView() {
   const busy = scanning || categorizing;
   const summary = tree?.summary;
 
-  const folderPicker = settings && settings.sandbox_folders.length > 0 && (
-    <label className="folder-picker">
-      <Icon name="folder" size={16} />
-      <select value={directory} onChange={(e) => setDirectory(e.target.value)} disabled={busy} aria-label="Folder to scan">
-        {settings.sandbox_folders.map((f) => <option key={f} value={f}>{folderName(f)}</option>)}
-      </select>
-    </label>
+  const names = folders.map(folderName);
+  const tidyLabel = scanning ? "Looking…" : categorizing ? "Sorting…" : !backendReady ? "Starting up…" : "Tidy my computer";
+  // Advanced: tidy just one of the folders
+  const oneFolder = folders.length > 1 && (
+    <details className="one-folder">
+      <summary>Only tidy one folder</summary>
+      <div className="one-folder-row">
+        <label className="folder-picker">
+          <Icon name="folder" size={16} />
+          <select value={directory} onChange={(e) => setDirectory(e.target.value)} disabled={busy} aria-label="Folder to tidy">
+            {folders.map((f) => <option key={f} value={f}>{folderName(f)}</option>)}
+          </select>
+        </label>
+        <button type="button" className="secondary" onClick={() => tidy([directory])} disabled={scanDisabled}>Tidy this folder</button>
+      </div>
+    </details>
   );
-  const scanLabel = scanning ? "Scanning…" : !backendReady ? "Starting up…" : hasTree ? "Scan for new files" : "Scan folder";
 
   return (
     <div className="scan-view">
@@ -344,9 +382,9 @@ export default function ScanView() {
         </div>
         {hasTree && (
           <div className="page-head-actions">
-            {folderPicker}
-            <button type="button" className="secondary" onClick={handleScan} disabled={scanDisabled}>
-              <Icon name="refresh" size={14} /> {scanLabel}
+            <button type="button" className="secondary" onClick={() => tidy(folders)} disabled={scanDisabled}
+              title={`Look for new files in ${listNames(names)}`}>
+              <Icon name="refresh" size={14} /> {busy ? tidyLabel : "Check for new files"}
             </button>
           </div>
         )}
@@ -355,7 +393,7 @@ export default function ScanView() {
       <Stepper step={step} />
 
       {!canScan && settings && (
-        <div className="notice warn"><Icon name="info" size={16} /> Pick at least one folder in the setup wizard or Settings before scanning.</div>
+        <div className="notice warn"><Icon name="info" size={16} /> Pick at least one folder in the setup wizard or Settings before tidying.</div>
       )}
       {error && (
         <div className="notice error" role="alert">
@@ -364,24 +402,25 @@ export default function ScanView() {
         </div>
       )}
 
-      {/* Step 1: pick a folder and scan */}
-      {!hasTree && !busy && results.length === 0 && (
+      {/* Step 1: one button */}
+      {!hasTree && !busy && !showPrefCheck && results.length === 0 && (
         <div className="card hero-card">
           <span className="hero-icon"><Icon name="broom" size={28} /></span>
-          <h3>Which folder should I tidy?</h3>
-          <p className="muted">I read file names and contents on this computer only. You’ll see the proposed tree before anything changes.</p>
-          <div className="hero-actions">
-            {folderPicker}
-            <button type="button" className="primary" onClick={handleScan} disabled={scanDisabled}>
-              <Icon name="scan" size={16} /> {scanLabel}
-            </button>
-          </div>
-          {scanned && !error && <p className="muted">Everything here is already in the tree. Nothing new to sort.</p>}
+          <h3>Let’s tidy up</h3>
+          <p className="muted">
+            {names.length > 0 ? <>I’ll look through <strong>{listNames(names)}</strong> and suggest a clean folder tree. </> : null}
+            Everything stays on this computer, and nothing moves until you’ve seen the plan.
+          </p>
+          <button type="button" className="primary hero-button" onClick={() => tidy(folders)} disabled={scanDisabled}>
+            <Icon name="sparkles" size={18} /> {tidyLabel}
+          </button>
+          {scanned && !error && <p className="muted hero-note">Everything is already in its place. Nothing new to sort.</p>}
+          {oneFolder && <div className="hero-links">{oneFolder}</div>}
         </div>
       )}
 
       {scanning && (
-        <ProgressCard title={<>Scanning <strong>{folderName(directory)}</strong></>} value={progress}
+        <ProgressCard title={<>Looking through <strong>{phaseLabel || folderName(directory)}</strong></>} value={progress}
           stats={[
             `${scanCount.toLocaleString()} files found`,
             scanEta > 0 && `about ${formatDuration(scanEta)} left`,
@@ -389,31 +428,31 @@ export default function ScanView() {
           ]} />
       )}
 
-      {results.length > 0 && !categorizing && !showPrefCheck && (
+      {/* Only shown if building was cancelled or failed: lets you pick it up again */}
+      {results.length > 0 && !busy && !showPrefCheck && (
         <div className="card found-card">
           <div>
             <h3>Found {plural(results.length, "new file")}</h3>
-            <p className="muted">Next I’ll read them and design a folder tree that fits.{!prefsAnswered && " First, a few quick choices about how you like things arranged."}</p>
+            <p className="muted">Ready to sort them into your tree.</p>
           </div>
           <div className="found-actions">
-            {prefsAnswered && (
-              <button type="button" className="ghost" onClick={() => setShowPrefCheck(true)}><Icon name="settings" size={14} /> My preferences</button>
-            )}
-            <button type="button" className="primary" onClick={() => (prefsAnswered ? handleCategorize() : setShowPrefCheck(true))}>
-              <Icon name="sparkles" size={16} /> {prefsAnswered ? "Build my tree" : "Continue"}
+            <button type="button" className="ghost" onClick={() => setShowPrefCheck(true)}><Icon name="settings" size={14} /> My preferences</button>
+            <button type="button" className="primary" onClick={() => (prefsAnswered ? buildTree(batches) : setShowPrefCheck(true))}>
+              <Icon name="sparkles" size={16} /> Sort them
             </button>
           </div>
         </div>
       )}
 
       {results.length > 0 && !categorizing && showPrefCheck && (
-        <PreferenceCheck files={results} directory={directory}
+        <PreferenceCheck files={results}
+          directory={[...batches].sort((a, b) => b.files.length - a.files.length)[0]?.directory ?? directory}
           onCancel={() => setShowPrefCheck(false)}
-          onDone={() => { setShowPrefCheck(false); setPrefsAnswered(true); handleCategorize(); }} />
+          onDone={() => { setShowPrefCheck(false); setPrefsAnswered(true); buildTree(batches); }} />
       )}
 
       {categorizing && (
-        <ProgressCard title={<>Reading {plural(results.length, "file")} and designing your tree</>} value={categorizeProgress}
+        <ProgressCard title={<>Sorting {plural(results.length, "file")}{phaseLabel && <> in <strong>{phaseLabel}</strong></>}</>} value={categorizeProgress}
           stats={[
             catFilesDone > 0 && `${catFilesDone.toLocaleString()} / ${catFilesTotal.toLocaleString()} files`,
             catTotalBatches > 1 && `batch ${catBatch} of ${catTotalBatches}`,
