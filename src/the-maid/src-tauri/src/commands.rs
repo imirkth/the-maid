@@ -381,13 +381,18 @@ pub async fn approve_and_clean(request: ApprovalRequest) -> Result<Vec<serde_jso
 // --- Categorize (LLM content analysis) ---
 
 #[tauri::command]
-pub async fn categorize_files(files: Vec<serde_json::Value>, directory: Option<String>) -> Result<serde_json::Value, String> {
+pub async fn categorize_files(files: Vec<serde_json::Value>, directory: Option<String>, mode: Option<String>) -> Result<serde_json::Value, String> {
     let client = reqwest::Client::builder()
         .timeout(std::time::Duration::from_secs(3600))
         .build()
         .map_err(|e| format!("HTTP client error: {}", e))?;
 
-    let body = serde_json::json!({ "files": files, "directory": directory.unwrap_or_default() });
+    // mode: "computer" (default) keeps folders the user named; "folder" cleans up one messy folder
+    let body = serde_json::json!({
+        "files": files,
+        "directory": directory.unwrap_or_default(),
+        "mode": mode.unwrap_or_else(|| "computer".to_string()),
+    });
 
     let resp = client
         .post("http://127.0.0.1:9473/categorize")

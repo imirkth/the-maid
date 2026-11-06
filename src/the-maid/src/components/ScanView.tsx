@@ -76,6 +76,7 @@ interface TreeSummary {
   to_sort?: number;
   kept_folders?: number;
   llm_named?: boolean;
+  mode?: "computer" | "folder";
 }
 
 interface CategorizeResponse {
@@ -360,13 +361,14 @@ export default function ScanView() {
     finally { setScanning(false); }
   };
 
-  const handleCategorize = async () => {
+  // mode "computer": keep folders you already named; "folder": clean up this one messy folder
+  const handleCategorize = async (mode: "computer" | "folder" = "computer") => {
     if (results.length === 0) return;
     setCategorizing(true); setCategorizeProgress(0); setCatFilesDone(0);
     setCatFilesTotal(results.length); setCatBatch(0); setCatTotalBatches(0);
     setCatElapsed(0); setCatEta(0); setError("");
     try {
-      const resp: CategorizeResponse = await invoke("categorize_files", { files: results, directory });
+      const resp: CategorizeResponse = await invoke("categorize_files", { files: results, directory, mode });
       const merged = await invoke<TreeState>("merge_tree", {
         categories: resp.categories, totalFiles: resp.total_files, totalCategorized: resp.total_categorized,
       });
@@ -696,7 +698,16 @@ export default function ScanView() {
       {results.length > 0 && !categorizing && (
         <div className="scan-results">
           <p className="scan-summary">Found <strong>{results.length}</strong> new files to categorize</p>
-          <button className="primary" onClick={handleCategorize} style={{ marginTop: "12px" }}>🧠 Categorize with AI</button>
+          <div style={{ display: "flex", gap: "12px", marginTop: "12px", flexWrap: "wrap" }}>
+            <button className="primary" onClick={() => handleCategorize("computer")}
+              title="Keeps the folders you already named and breaks up dump folders like Downloads or Misc">
+              🧠 Sort it out
+            </button>
+            <button className="secondary" onClick={() => handleCategorize("folder")}
+              title="For a folder you know is messy: every file is placed by its content, its sub-folders are not trusted">
+              🧹 Clean up this folder
+            </button>
+          </div>
         </div>
       )}
 
@@ -727,7 +738,9 @@ export default function ScanView() {
                 <strong>{tree!.summary.after.folders}</strong> folders, max depth <strong>{tree!.summary.after.max_depth}</strong>
                 {" "}(today: {tree!.summary.before.folders} folders, depth {tree!.summary.before.max_depth}
                 {tree!.summary.before.loose_files > 0 && <>, {tree!.summary.before.loose_files} loose files</>}).
-                {(tree!.summary.kept_folders ?? 0) > 0 && <> I kept {tree!.summary.kept_folders} of your own folders intact.</>}
+                {tree!.summary.mode === "folder"
+                  ? <> Clean-up mode: I placed every file by its content and didn’t trust the existing sub-folders.</>
+                  : (tree!.summary.kept_folders ?? 0) > 0 && <> I kept {tree!.summary.kept_folders} of your own folders intact.</>}
                 {(tree!.summary.to_sort ?? 0) > 0 && <> {tree!.summary.to_sort} files had too little signal and wait in “To Sort”.</>}
               </p>
             )}

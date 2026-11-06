@@ -6,7 +6,7 @@ Handles all requests from Tauri frontend.
 from fastapi import FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel, Field
-from typing import List, Optional
+from typing import List, Literal, Optional
 import json
 import os
 
@@ -58,6 +58,10 @@ class ScanRequest(BaseModel):
 class CategorizeRequest(BaseModel):
     files: List[dict] = Field(default_factory=list)
     directory: str = Field(default="", description="Scan root directory for relative path computation")
+    mode: Literal["computer", "folder"] = Field(
+        default="computer",
+        description="computer: trust folders the user named; folder: clean up one messy folder, trust nothing inside",
+    )
 
 class FileProposal(BaseModel):
     file_id: str
@@ -198,7 +202,7 @@ async def categorize_files(request: CategorizeRequest):
 
     # Design the tree
     _cat_start = _time.monotonic()
-    result = llm.categorize_all(files, _sandbox_folders(), scan_root=request.directory)
+    result = llm.categorize_all(files, _sandbox_folders(), scan_root=request.directory, mode=request.mode)
     _cat_elapsed = _time.monotonic() - _cat_start
 
     # Emit completion
