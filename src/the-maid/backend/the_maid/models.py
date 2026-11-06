@@ -120,7 +120,6 @@ class LLMManager:
         files: List[Dict[str, Any]],
         sandbox_folders: Optional[list[str]] = None,
         scan_root: str = "",
-        mode: str = "computer",
     ) -> Dict[str, Any]:
         """
         Design a folder tree for ``files``.
@@ -130,7 +129,7 @@ class LLMManager:
         """
         if not files:
             return {"tree": [], "summary": {}}
-        architect = TreeArchitect(scan_root, namer=self._namer if self._loaded else None, mode=mode)
+        architect = TreeArchitect(scan_root, namer=self._namer if self._loaded else None)
         result = architect.build(files)
         save_model(result["model"])
         try:

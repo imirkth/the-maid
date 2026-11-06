@@ -71,9 +71,6 @@ ROUTE_MIN_SIMILARITY = 0.12
 
 TO_SORT = "To Sort"
 
-MODE_COMPUTER = "computer"    # sort my computer: trust folders the user named
-MODE_FOLDER = "folder"        # clean up this folder: trust nothing inside it
-
 # ---------------------------------------------------------------------------
 # File kinds
 # ---------------------------------------------------------------------------
@@ -345,8 +342,7 @@ def _rel_dirs(path: str, scan_root: str) -> List[str]:
 
 
 def profile_file(idx: int, f: Dict[str, Any], scan_root: str,
-                 read_content: Callable[[str], str] = None,
-                 folder_weight: float = 1.0) -> FileProfile:
+                 read_content: Callable[[str], str] = None) -> FileProfile:
     read_content = read_content or (lambda p: extract_text(p, max_chars=CONTENT_CHARS))
     path = f.get("path", "")
     filename = f.get("filename") or os.path.basename(path)
@@ -362,7 +358,7 @@ def profile_file(idx: int, f: Dict[str, Any], scan_root: str,
     meaningful = [d for d in rel if not is_generic_folder(d)]
     for depth, d in enumerate(reversed(meaningful)):
         for t in tokenize(d):
-            terms[t] += max(0.8, 2.0 - 0.4 * depth) * folder_weight
+            terms[t] += max(0.8, 2.0 - 0.4 * depth)
     if kind not in MEDIA_KINDS and kind not in {"audio", "installer", "archive", "font"}:
         content = ""
         try:
@@ -760,15 +756,7 @@ class Placement:
 
 class TreeArchitect:
     def __init__(self, scan_root: str = "", namer: Optional[Callable[[str], str]] = None,
-                 read_content: Optional[Callable[[str], str]] = None, mode: str = MODE_COMPUTER):
-        """mode="computer": sort a whole drive — folders the user already named are
-        trusted and kept whole; only dump folders are broken up.
-        mode="folder": clean up ONE folder the user knows is messy — nothing inside
-        is trusted, every file is placed by its content (sub-folder names are only a
-        weak hint), and the cleaned folder's own name is context for naming."""
-        if mode not in (MODE_COMPUTER, MODE_FOLDER):
-            raise ValueError(f"unknown mode {mode!r}")
-        self.mode = mode
+                 read_content: Optional[Callable[[str], str]] = None):
         self.scan_root = scan_root
         self.namer = namer
         self.read_content = read_content
@@ -780,12 +768,7 @@ class TreeArchitect:
         if not files:
             return {"tree": [], "summary": {}, "model": {}}
         profiles = self._profile_all(files)
-        if self.mode == MODE_FOLDER:
-            units = [Unit(key=f"file:{p.id}", files=[p]) for p in profiles]
-        else:
-            units = build_units(profiles)
-        root_name = os.path.basename(os.path.normpath(self.scan_root)) if self.scan_root else ""
-        context = Node(name=root_name) if self.mode == MODE_FOLDER and root_name else None
+        units = build_units(profiles)
 
         media_units, audio_units, software_units, topic_units = [], [], [], []
         for u in units:
@@ -809,10 +792,10 @@ class TreeArchitect:
         if signal:
             if len(signal) == 1 or _files(signal) < MIN_GROUP_FILES * 2:
                 n = Node(name="", units=signal, centroid=_centroid(u.vec for u in signal))
-                name_siblings([n], context, self.namer)
+                name_siblings([n], None, self.namer)
                 top_nodes = [n]
             else:
-                top_nodes = build_topic_nodes(signal, self.namer, context, 0)
+                top_nodes = build_topic_nodes(signal, self.namer, None, 0)
         for node in top_nodes:
             self._place_topic(node, [], placements)
 
@@ -832,8 +815,7 @@ class TreeArchitect:
         total = len(files)
         profiles = []
         for i, f in enumerate(files):
-            profiles.append(profile_file(i, f, self.scan_root, self.read_content,
-                                         folder_weight=0.4 if self.mode == MODE_FOLDER else 1.0))
+            profiles.append(profile_file(i, f, self.scan_root, self.read_content))
             done = i + 1
             if done % 100 == 0 or done == total:
                 elapsed = time.monotonic() - start
@@ -997,7 +979,6 @@ class TreeArchitect:
             "to_sort": unsorted,
             "kept_folders": len({tuple(p.path) for p in placements if "Kept your folder" in p.rationale or p.rationale.startswith("Album")}),
             "llm_named": bool(self.namer),
-            "mode": self.mode,
         }
 
 
