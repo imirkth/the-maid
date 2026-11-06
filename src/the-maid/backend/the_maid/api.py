@@ -13,7 +13,8 @@ import os
 from .scanner import FileScanner
 from .sandbox import validate_path
 from .models import LLMManager
-from .tree_architect import TO_SORT, TreeRouter, load_model
+from .tree_architect import TO_SORT, TreeArchitect, TreeRouter, load_model
+from .preferences import Preferences, load_preferences, save_preferences
 from .face_detector import FaceDetector, detect_faces_for_scan
 from .face_cluster import FaceClusterer, cluster_faces_from_scan
 from .face_tagger import rename_cluster_with_tags, get_clusters_for_ui
@@ -198,7 +199,8 @@ async def categorize_files(request: CategorizeRequest):
 
     # Design the tree
     _cat_start = _time.monotonic()
-    result = llm.categorize_all(files, _sandbox_folders(), scan_root=request.directory)
+    result = llm.categorize_all(files, _sandbox_folders(), scan_root=request.directory,
+                               prefs=load_preferences())
     _cat_elapsed = _time.monotonic() - _cat_start
 
     # Emit completion
@@ -658,6 +660,41 @@ async def execute_moves(approved_file_ids: List[str]):
     if any(r["status"] == "moved" for r in results):
         _save_tree(data)  # keep tree paths in sync with disk
     return {"results": results}
+
+
+@app.get("/preferences")
+async def get_preferences():
+    """The user's saved tree preferences (defaults if never answered)."""
+    return load_preferences().to_dict()
+
+
+@app.put("/preferences")
+async def put_preferences(data: dict):
+    """Save the answers from the preference check; applied to every later build."""
+    prefs = Preferences.from_dict({**data, "answered": True})
+    for folder in prefs.protected:
+        try:
+            validate_path(folder, _sandbox_folders())
+        except ValueError as e:
+            raise HTTPException(status_code=400, detail=str(e))
+    save_preferences(prefs)
+    return prefs.to_dict()
+
+
+@app.post("/tree/choices")
+async def tree_choices(request: CategorizeRequest):
+    """Preference check: questions whose options are previewed on the user's own files."""
+    if request.directory:
+        try:
+            validate_path(request.directory, _sandbox_folders())
+        except ValueError as e:
+            raise HTTPException(status_code=400, detail=str(e))
+    files = request.files
+    for f in files:
+        if "exif" not in f:
+            f["exif"] = extract_exif(f.get("path", ""))
+    architect = TreeArchitect(request.directory, prefs=load_preferences())
+    return architect.preview_choices(files)
 
 
 class RouteRequest(BaseModel):

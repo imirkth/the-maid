@@ -1266,3 +1266,45 @@ button.small {
   color: var(--text-secondary);
   font-size: 1.2rem;
 }
+
+/* Preference check */
+.pref-check {
+  background: var(--bg-card);
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  padding: 16px;
+  margin-top: 12px;
+}
+.pref-question { margin-top: 16px; }
+.pref-question-title { font-weight: 600; margin-bottom: 8px; }
+.pref-options { display: flex; flex-wrap: wrap; gap: 10px; }
+.pref-option {
+  flex: 1 1 220px;
+  text-align: left;
+  background: var(--bg-secondary);
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  padding: 10px 12px;
+  color: var(--text-primary);
+  cursor: pointer;
+}
+.pref-option.selected { border-color: var(--accent); box-shadow: 0 0 0 1px var(--accent); }
+.pref-option ul {
+  margin: 6px 0 0;
+  padding-left: 16px;
+  font-family: var(--font-mono);
+  font-size: 0.78rem;
+  color: var(--text-secondary);
+}
+.pref-chips { display: flex; flex-wrap: wrap; gap: 6px; margin-bottom: 8px; }
+.pref-chip {
+  background: var(--bg-secondary);
+  border: 1px solid var(--border);
+  border-radius: 999px;
+  padding: 4px 12px;
+  color: var(--text-primary);
+  cursor: pointer;
+}
+.pref-chip.selected { border-color: var(--accent); color: var(--accent); }
+.pref-protect { display: block; margin: 4px 0; }
+.pref-actions { display: flex; gap: 12px; margin-top: 18px; }
