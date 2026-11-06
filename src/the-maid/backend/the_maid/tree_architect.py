@@ -49,6 +49,7 @@ from typing import Any, Callable, Dict, Iterable, List, Optional, Tuple
 
 from .extractor import extract_text
 from .preferences import Preferences
+from .feedback import Feedback
 
 # ---------------------------------------------------------------------------
 # Tunables
@@ -69,6 +70,7 @@ EVENT_GAP_HOURS = 36          # photo gap that starts a new event
 EVENT_MAX_DAYS = 10           # longer "events" are really a stream: split by month
 EVENT_MIN_PHOTOS = 4          # smaller events fold into "<month> other"
 ROUTE_MIN_SIMILARITY = 0.12
+ATTACH_SIMILARITY = 0.35      # a new file this close to a folder you pinned joins it
 
 TO_SORT = "To Sort"
 SUGGESTED_AREAS = ["Work", "Personal", "Family", "Finance & Admin", "Studies", "Projects", "Hobbies"]
@@ -808,9 +810,11 @@ class Placement:
 class TreeArchitect:
     def __init__(self, scan_root: str = "", namer: Optional[Callable[[str], str]] = None,
                  read_content: Optional[Callable[[str], str]] = None,
-                 prefs: Optional[Preferences] = None):
+                 prefs: Optional[Preferences] = None,
+                 feedback: Optional[Feedback] = None):
         self.scan_root = scan_root
         self.prefs = prefs or Preferences()
+        self.feedback = feedback or Feedback()
         self.namer = namer
         self.read_content = read_content
         self.idf: Dict[str, float] = {}
@@ -896,11 +900,26 @@ class TreeArchitect:
     def _build_from_profiles(self, all_profiles: List[FileProfile], files: List[Dict[str, Any]]) -> Dict[str, Any]:
         self.idf, self.leaf_profiles = {}, []
         prefs = self.prefs
-        profiles = [p for p in all_profiles if not prefs.is_protected(p.path)]
+        fb = self.feedback
+        profiles = [p for p in all_profiles
+                    if not prefs.is_protected(p.path) and not fb.is_excluded(p.path)]
         protected = len(all_profiles) - len(profiles)
         if not profiles:
             return {"tree": [], "summary": {"files": 0, "protected": protected}, "model": self.model()}
-        units = build_units(profiles)
+        # Files the user put in a folder go back there; the rest is re-sorted around them
+        pinned: Dict[str, List[FileProfile]] = defaultdict(list)
+        free: List[FileProfile] = []
+        for p in profiles:
+            folder = fb.pinned_path(p.path)
+            if folder:
+                pinned[folder].append(p)
+            else:
+                free.append(p)
+        placements: List[Placement] = []
+        for folder, fs in pinned.items():
+            for f in fs:
+                placements.append(Placement(f.id, folder.split("/"), "You put this file here"))
+        units = build_units(free)
 
         media_units, audio_units, software_units, topic_units = [], [], [], []
         for u in units:
@@ -915,8 +934,28 @@ class TreeArchitect:
                 topic_units.append(u)
 
         self.idf = vectorize_units(topic_units) if topic_units else {}
-        placements: List[Placement] = []
         top_nodes: List[Node] = []
+
+        # Learn from pinned folders: their profile joins the routing model, and
+        # new files that clearly look like them join them.
+        pinned_vecs = {folder: self._pinned_vector(fs) for folder, fs in pinned.items()}
+        pinned_vecs = {k: v for k, v in pinned_vecs.items() if v}
+        for folder, vec in pinned_vecs.items():
+            self.leaf_profiles.append({"path": folder, "centroid": {k: round(x, 4) for k, x in _top(vec, 30).items()},
+                                       "pinned": True})
+        if pinned_vecs:
+            still_free = []
+            for u in topic_units:
+                best, best_s = None, 0.0
+                for folder, vec in pinned_vecs.items():
+                    sim = _cos(u.vec, vec)
+                    if sim > best_s:
+                        best, best_s = folder, sim
+                if best and best_s >= ATTACH_SIMILARITY:
+                    self._place_units([u], best.split("/"), f"Looks like the files you put in {best}", placements)
+                else:
+                    still_free.append(u)
+            topic_units = still_free
 
         # Topic folders
         signal = [u for u in topic_units if u.vec]
@@ -945,7 +984,18 @@ class TreeArchitect:
         summary = self._summary(profiles, placements)
         summary["protected"] = protected
         summary["preferences"] = prefs.to_dict()
+        summary["pinned_files"] = sum(len(v) for v in pinned.values())
+        summary["pinned_folders"] = len(pinned)
         return {"tree": tree, "summary": summary, "model": self.model()}
+
+    def _pinned_vector(self, files: List[FileProfile]) -> Vec:
+        """TF-IDF profile of a folder the user filled, in the current idf space."""
+        default_idf = math.log(len(self.idf) + 2) + 1.0 if self.idf else 1.0
+        acc: Vec = {}
+        for f in files:
+            for t, w in f.terms.items():
+                acc[t] = acc.get(t, 0.0) + w * self.idf.get(t, default_idf) / max(1, len(files)) ** 0.5
+        return _normalize(_top(acc, MAX_TERMS_PER_VECTOR))
 
     def _profile_all(self, files: List[Dict[str, Any]], progress: bool = True) -> List[FileProfile]:
         """Profile every file, emitting the categorize_progress events the UI shows."""
