@@ -1,7 +1,11 @@
-import { useState, useEffect, useCallback } from "react";
+import { useState, useEffect, type ReactNode } from "react";
 import { invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
 import PreferenceCheck from "./PreferenceCheck";
+import TreeExplorer from "./TreeExplorer";
+import Icon from "./Icon";
+import { allFiles, buildFolderTree, findNode, fullPath, plural, type TreeCategory } from "../lib/tree";
+import { recordFeedback, type TreeFeedback } from "../lib/feedback";
 
 interface FileMeta {
   file_id: string;
@@ -24,41 +28,6 @@ interface Settings {
   first_run: boolean;
   setup_complete: boolean;
   buckets: { id: string; name: string; path: string }[];
-}
-
-// Content tree types
-interface TreeFile {
-  file_id: string;
-  filename: string;
-  path: string;
-  proposed_path?: string;
-  size_bytes: number;
-  rationale: string;
-  confidence: number;
-  tags: string[];
-  approved?: boolean;
-}
-
-interface TreeChild {
-  name?: string;
-  count?: number;
-  files?: TreeFile[];
-  file_id?: string;
-  filename?: string;
-  path?: string;
-  proposed_path?: string;
-  size_bytes?: number;
-  rationale?: string;
-  confidence?: number;
-  tags?: string[];
-  approved?: boolean;
-}
-
-interface TreeCategory {
-  name: string;
-  count: number;
-  rationale?: string;
-  children: TreeChild[];
 }
 
 // Before/after structure comparison returned by the tree architect
@@ -94,80 +63,6 @@ interface TreeState {
   summary?: TreeSummary;
 }
 
-interface NestedNode {
-  name: string;
-  fullPath: string;
-  count: number;
-  rationale?: string;
-  files?: TreeFile[];
-  children: NestedNode[];
-}
-
-// Folders whose files are left where they are (nothing to approve)
-function isHoldingCategory(name: string): boolean {
-  return name === "Uncategorized" || name === "To Sort";
-}
-
-function shortPath(fullPath: string): string {
-  const parts = fullPath.split('/');
-  if (parts.length <= 3) return fullPath;
-  return '…/' + parts.slice(-2).join('/');
-}
-
-type NestedNodeMap = Record<string, NestedNodeBuild>;
-
-interface NestedNodeBuild {
-  name: string;
-  fullPath: string;
-  count: number;
-  rationale?: string;
-  files?: TreeFile[];
-  children: NestedNodeMap;
-}
-
-function buildNestedTree(children: TreeChild[]): { nodes: NestedNode[]; directFiles: TreeFile[] } {
-  const directFiles: TreeFile[] = [];
-  const root: NestedNodeMap = {};
-  for (const child of children) {
-    if (child.name && child.files) {
-      const parts = child.name.split('/').filter(p => p);
-      let current = root;
-      let currentPath = '';
-      for (let i = 0; i < parts.length; i++) {
-        const part = parts[i];
-        currentPath = currentPath ? `${currentPath}/${part}` : part;
-        if (!current[part]) {
-          current[part] = { name: part, fullPath: currentPath, count: 0, children: {} };
-        }
-        if (i === parts.length - 1) {
-          current[part].count = child.count ?? 0;
-          current[part].files = child.files;
-          current[part].rationale = child.rationale ?? child.files[0]?.rationale;
-        }
-        current = current[part].children;
-      }
-    } else if (child.file_id) {
-      directFiles.push(child as TreeFile);
-    }
-  }
-  function toArray(nodes: NestedNodeMap): NestedNode[] {
-    return Object.values(nodes).map(n => {
-      const kids = toArray(n.children);
-      // Intermediate folders (e.g. "Photos/2023") count the files below them
-      const count = n.count + kids.reduce((sum, k) => sum + k.count, 0);
-      return { name: n.name, fullPath: n.fullPath, count, rationale: n.rationale, files: n.files, children: kids };
-    });
-  }
-  return { nodes: toArray(root), directFiles };
-}
-
-function formatSize(bytes: number): string {
-  if (bytes < 1024) return `${bytes} B`;
-  if (bytes < 1024 * 1024) return `${(bytes / 1024).toFixed(1)} KB`;
-  if (bytes < 1024 * 1024 * 1024) return `${(bytes / (1024 * 1024)).toFixed(1)} MB`;
-  return `${(bytes / (1024 * 1024 * 1024)).toFixed(1)} GB`;
-}
-
 interface ScanProgress {
   count: number;
   max_files: number;
@@ -194,30 +89,37 @@ function formatDuration(seconds: number): string {
   return `${m}m ${s}s`;
 }
 
-function confidenceClass(c: number): string {
-  if (c >= 0.75) return "confidence-high";
-  if (c >= 0.5) return "confidence-medium";
-  if (c > 0) return "confidence-low";
-  return "confidence-none";
+function folderName(path: string): string {
+  return path.split(/[\\/]/).filter(Boolean).pop() || path;
 }
 
-// ponytail: collect all file_ids from a subcategory's files array
-function subcategoryFileIds(cat: TreeCategory, subName: string): string[] {
-  const child = cat.children.find(c => c.name === subName && c.files);
-  return child?.files?.map(f => f.file_id) ?? [];
+const STEPS = ["Scan a folder", "Shape your tree", "Move your files"];
+
+function Stepper({ step }: { step: number }) {
+  return (
+    <ol className="stepper" aria-label="Progress">
+      {STEPS.map((label, i) => (
+        <li key={label} className={i < step ? "done" : i === step ? "current" : ""} aria-current={i === step ? "step" : undefined}>
+          <span className="step-dot">{i < step ? <Icon name="check" size={12} /> : i + 1}</span>
+          <span className="step-label">{label}</span>
+        </li>
+      ))}
+    </ol>
+  );
 }
 
-// ponytail: collect all file_ids in a category (subs + direct files)
-function categoryFileIds(cat: TreeCategory): string[] {
-  const ids: string[] = [];
-  for (const child of cat.children) {
-    if (child.files) {
-      for (const f of child.files) ids.push(f.file_id);
-    } else if (child.file_id) {
-      ids.push(child.file_id);
-    }
-  }
-  return ids;
+function ProgressCard({ title, value, stats }: { title: ReactNode; value: number; stats: (string | false)[] }) {
+  return (
+    <div className="card progress-card">
+      <div className="progress-card-head">
+        <span className="spinner" aria-hidden="true" />
+        <span>{title}</span>
+        <span className="progress-pct">{Math.round(value)}%</span>
+      </div>
+      <div className="progress-bar"><div className="progress-fill" style={{ width: `${value}%` }} /></div>
+      <div className="scan-progress-stats">{stats.filter(Boolean).map((s) => <span key={s as string}>{s}</span>)}</div>
+    </div>
+  );
 }
 
 export default function ScanView() {
@@ -225,7 +127,6 @@ export default function ScanView() {
   const [scanning, setScanning] = useState(false);
   const [progress, setProgress] = useState(0);
   const [scanCount, setScanCount] = useState(0);
-  const [scanMax, setScanMax] = useState(0);
   const [scanElapsed, setScanElapsed] = useState(0);
   const [scanEta, setScanEta] = useState(0);
   const [results, setResults] = useState<FileMeta[]>([]);
@@ -251,71 +152,36 @@ export default function ScanView() {
 
   // Persistent tree state
   const [tree, setTree] = useState<TreeState | null>(null);
-  const [expandedCats, setExpandedCats] = useState<Set<string>>(new Set());
-  const [expandedSubs, setExpandedSubs] = useState<Set<string>>(new Set());
-
-  // Tree editing state
-  const [editingCat, setEditingCat] = useState<string | null>(null);
-  const [editCatValue, setEditCatValue] = useState("");
-  const [editingSub, setEditingSub] = useState<string | null>(null); // "cat::sub"
-  const [editSubValue, setEditSubValue] = useState("");
+  const [treeKey, setTreeKey] = useState(0); // remounts the explorer for a freshly built tree
+  const [excluded, setExcluded] = useState<Set<string>>(new Set());
   const [selectedFileIds, setSelectedFileIds] = useState<Set<string>>(new Set());
-  const [movingFileId, setMovingFileId] = useState<string | null>(null);
-  const [moveTargetCat, setMoveTargetCat] = useState("");
-  const [moveTargetSub, setMoveTargetSub] = useState("");
+  const [approving, setApproving] = useState(false);
   const [executing, setExecuting] = useState(false);
   const [executeResults, setExecuteResults] = useState<string | null>(null);
-
-  // Accept/refuse state — track per-category and per-subcategory
-  const [acceptedCats, setAcceptedCats] = useState<Set<string>>(new Set());
-  const [refusedCats, setRefusedCats] = useState<Set<string>>(new Set());
-  const [acceptedSubs, setAcceptedSubs] = useState<Set<string>>(new Set()); // "cat::sub"
-  const [refusedSubs, setRefusedSubs] = useState<Set<string>>(new Set()); // "cat::sub"
-
-  // Bulk move bar
-  const [bulkMoveCat, setBulkMoveCat] = useState("");
-  const [bulkMoveSub, setBulkMoveSub] = useState("");
-
-  // Merge dropdown
-  const [mergingCat, setMergingCat] = useState<string | null>(null);
-
-  const updateTree = useCallback((updated: { tree: TreeCategory[] }) => {
-    setTree(prev => prev ? { ...prev, tree: updated.tree } : null);
-  }, []);
 
   useEffect(() => {
     invoke<Settings>("get_settings")
       .then((s) => {
         setSettings(s);
         setCanScan(s.sandbox_folders.length > 0);
-        if (s.sandbox_folders.length > 0 && !directory) {
-          setDirectory(`${s.sandbox_folders[0]}`);
-        }
+        if (s.sandbox_folders.length > 0) setDirectory((d) => d || s.sandbox_folders[0]);
       })
       .catch((e) => setError(String(e)));
 
     invoke<TreeState>("get_tree")
-      .then((t) => {
-        if (t.tree && t.tree.length > 0) {
-          setTree(t);
-          const initial = new Set<string>();
-          t.tree.slice(0, 3).forEach((c) => initial.add(c.name));
-          setExpandedCats(initial);
-        }
-      })
+      .then((t) => { if (t?.tree && t.tree.length > 0) setTree(t); })
       .catch(() => {});
 
     const unlistenReady = listen<boolean>("backend_ready", (e) => setBackendReady(e.payload));
     invoke("ping_backend").then(() => setBackendReady(true)).catch(() => {});
     invoke<{ answered?: boolean }>("get_preferences")
-      .then((p) => setPrefsAnswered(!!p.answered))
+      .then((p) => setPrefsAnswered(!!p?.answered))
       .catch(() => {});
 
     const unlistenProgress = listen<ScanProgress>("scan_progress", (e) => {
       const p = e.payload;
       setProgress(p.progress * 100);
       setScanCount(p.count);
-      setScanMax(p.max_files);
       setScanElapsed(p.elapsed_seconds);
       setScanEta(p.eta_seconds);
     });
@@ -357,8 +223,8 @@ export default function ScanView() {
   const handleScan = async () => {
     if (!directory || !canScan) return;
     setScanning(true);
-    setProgress(0); setScanCount(0); setScanMax(0); setScanElapsed(0); setScanEta(0);
-    setError(""); setResults([]); setScanned(false);
+    setProgress(0); setScanCount(0); setScanElapsed(0); setScanEta(0);
+    setError(""); setResults([]); setScanned(false); setExecuteResults(null);
     try {
       const resp: ScanResponse = await invoke("scan_directory", { request: { directory, max_files: 10000 } });
       setResults(resp.files);
@@ -379,340 +245,164 @@ export default function ScanView() {
         categories: resp.categories, totalFiles: resp.total_files, totalCategorized: resp.total_categorized,
       });
       setTree(merged);
-      const initial = new Set<string>();
-      (merged.tree || []).slice(0, 3).forEach((c) => initial.add(c.name));
-      setExpandedCats(initial);
+      setTreeKey((k) => k + 1);
+      setResults([]);
     } catch (err) { setError(String(err)); }
     finally { setCategorizing(false); }
   };
 
-  const toggleCat = (name: string) => {
-    setExpandedCats((prev) => { const n = new Set(prev); n.has(name) ? n.delete(name) : n.add(name); return n; });
-  };
-  const toggleSub = (key: string) => {
-    setExpandedSubs((prev) => { const n = new Set(prev); n.has(key) ? n.delete(key) : n.add(key); return n; });
-  };
-
-  // --- Category edit ---
-  const startRenameCat = (name: string) => { setEditingCat(name); setEditCatValue(name); };
-  const submitRenameCat = async () => {
-    if (!editingCat || !editCatValue.trim()) return;
-    try { const u = await invoke<{ tree: TreeCategory[] }>("edit_category", { oldName: editingCat, newName: editCatValue.trim(), delete: false }); updateTree(u); }
-    catch (e) { setError(String(e)); }
-    setEditingCat(null);
-  };
-  const deleteCat = async (name: string) => {
-    if (!confirm(`Delete category "${name}"? Files will move to Uncategorized.`)) return;
-    try { const u = await invoke<{ tree: TreeCategory[] }>("edit_category", { oldName: name, newName: null, delete: true }); updateTree(u); }
-    catch (e) { setError(String(e)); }
+  const toggleExcluded = (id: string) => {
+    const node = tree ? findNode(buildFolderTree(tree.tree), id) : undefined;
+    const wasOff = excluded.has(id);
+    setExcluded((prev) => { const n = new Set(prev); wasOff ? n.delete(id) : n.add(id); return n; });
+    if (node) void recordFeedback([{ action: wasOff ? "include" : "exclude", file_ids: allFiles(node).map((f) => f.file_id) }]);
   };
 
-  // --- Subcategory edit ---
-  const startRenameSub = (catName: string, subName: string) => {
-    setEditingSub(`${catName}::${subName}`); setEditSubValue(subName);
-  };
-  const submitRenameSub = async (catName: string, oldSub: string) => {
-    if (!editSubValue.trim()) return;
-    try { const u = await invoke<{ tree: TreeCategory[] }>("edit_subcategory", { categoryName: catName, oldSubname: oldSub, newSubname: editSubValue.trim(), delete: false }); updateTree(u); }
-    catch (e) { setError(String(e)); }
-    setEditingSub(null);
-  };
-  const deleteSub = async (catName: string, subName: string) => {
-    if (!confirm(`Delete subfolder "${subName}"? Files will move to parent category.`)) return;
-    try { const u = await invoke<{ tree: TreeCategory[] }>("edit_subcategory", { categoryName: catName, oldSubname: subName, newSubname: null, delete: true }); updateTree(u); }
-    catch (e) { setError(String(e)); }
-  };
-
-  // --- Merge categories ---
-  const submitMerge = async (source: string, target: string) => {
-    if (source === target) return;
-    if (!confirm(`Merge "${source}" into "${target}"? All files will move to ${target}.`)) return;
-    try { const u = await invoke<{ tree: TreeCategory[] }>("merge_categories", { sourceName: source, targetName: target }); updateTree(u); }
-    catch (e) { setError(String(e)); }
-    setMergingCat(null);
-  };
-
-  // --- Accept / Refuse ---
-  const acceptCat = (name: string) => {
-    setAcceptedCats(prev => { const n = new Set(prev); n.add(name); return n; });
-    setRefusedCats(prev => { const n = new Set(prev); n.delete(name); return n; });
-  };
-  const refuseCat = (name: string) => {
-    setRefusedCats(prev => { const n = new Set(prev); n.add(name); return n; });
-    setAcceptedCats(prev => { const n = new Set(prev); n.delete(name); return n; });
-  };
-  const acceptSub = (key: string) => {
-    setAcceptedSubs(prev => { const n = new Set(prev); n.add(key); return n; });
-    setRefusedSubs(prev => { const n = new Set(prev); n.delete(key); return n; });
-  };
-  const refuseSub = (key: string) => {
-    setRefusedSubs(prev => { const n = new Set(prev); n.add(key); return n; });
-    setAcceptedSubs(prev => { const n = new Set(prev); n.delete(key); return n; });
-  };
-
-  const hasTree = tree && tree.tree && tree.tree.length > 0;
-
-  // All categories must have a decision before approving
-  const allCatsDecided = hasTree ? tree!.tree.every(c =>
-    isHoldingCategory(c.name) || acceptedCats.has(c.name) || refusedCats.has(c.name)
-  ) : false;
-
-  // --- Approve structure (move refused to Uncategorized first) ---
+  // Approve: files in folders switched off go to Uncategorized (they stay where they are)
   const approveStructure = async () => {
-    // Move files from refused subcategories to Uncategorized
-    for (const subKey of refusedSubs) {
-      const [catName, subName] = subKey.split("::");
-      const cat = tree?.tree.find(c => c.name === catName);
-      if (!cat) continue;
-      const ids = subcategoryFileIds(cat, subName);
-      if (ids.length > 0) {
-        try { await invoke("bulk_move_files", { fileIds: ids, targetCategory: "Uncategorized", targetSubcategory: "" }); }
-        catch (e) { setError(String(e)); }
-      }
-    }
-    // Move files from refused categories to Uncategorized
-    for (const catName of refusedCats) {
-      const cat = tree?.tree.find(c => c.name === catName);
-      if (!cat) continue;
-      const ids = categoryFileIds(cat);
-      if (ids.length > 0) {
-        try { await invoke("bulk_move_files", { fileIds: ids, targetCategory: "Uncategorized", targetSubcategory: "" }); }
-        catch (e) { setError(String(e)); }
-      }
-    }
+    if (!tree) return;
+    setApproving(true); setError("");
     try {
+      const nodes = buildFolderTree(tree.tree);
+      const ids = new Set<string>();
+      for (const id of excluded) {
+        const node = findNode(nodes, id);
+        if (node) allFiles(node).forEach((f) => ids.add(f.file_id));
+      }
+      let latest = tree.tree;
+      if (ids.size > 0) {
+        const res = await invoke<{ tree: TreeCategory[] }>("bulk_move_files", {
+          fileIds: [...ids], targetCategory: "Uncategorized", targetSubcategory: "",
+        });
+        if (res?.tree) latest = res.tree;
+      }
       await invoke("approve_tree_structure");
-      setTree(prev => prev ? { ...prev, approved_structure: true } : null);
+      // Approving accepts every folder that is in use: the builder keeps them next time
+      const accepted: TreeFeedback[] = buildFolderTree(latest)
+        .filter((n) => !n.holding)
+        .map((n) => ({ action: "pin", path: fullPath(n) }));
+      void recordFeedback(accepted);
+      setTree((prev) => (prev ? { ...prev, tree: latest, approved_structure: true } : null));
+      setExcluded(new Set());
+      // Start with every file that will move already picked
+      const movable = new Set<string>();
+      for (const n of buildFolderTree(latest)) if (!n.holding) allFiles(n).forEach((f) => movable.add(f.file_id));
+      setSelectedFileIds(movable);
     } catch (e) { setError(String(e)); }
+    finally { setApproving(false); }
   };
 
-  // --- File selection ---
-  const toggleFileSelection = (fileId: string) => {
-    setSelectedFileIds((prev) => { const n = new Set(prev); n.has(fileId) ? n.delete(fileId) : n.add(fileId); return n; });
-  };
-  const selectAllInSub = (cat: TreeCategory, subName: string) => {
-    const ids = subcategoryFileIds(cat, subName);
-    const allSelected = ids.every(id => selectedFileIds.has(id));
-    setSelectedFileIds(prev => {
-      const n = new Set(prev);
-      if (allSelected) { ids.forEach(id => n.delete(id)); }
-      else { ids.forEach(id => n.add(id)); }
-      return n;
-    });
-  };
-
-  const selectAllInSubByPath = (ids: string[]) => {
-    const allSelected = ids.length > 0 && ids.every(id => selectedFileIds.has(id));
-    setSelectedFileIds(prev => {
-      const n = new Set(prev);
-      if (allSelected) { ids.forEach(id => n.delete(id)); }
-      else { ids.forEach(id => n.add(id)); }
-      return n;
-    });
-  };
-
-  // --- Single file move ---
-  const submitMoveFile = async () => {
-    if (!movingFileId || !moveTargetCat) return;
-    try { const u = await invoke<{ tree: TreeCategory[] }>("move_file_in_tree", { fileId: movingFileId, targetCategory: moveTargetCat, targetSubcategory: moveTargetSub }); updateTree(u); }
-    catch (e) { setError(String(e)); }
-    setMovingFileId(null); setMoveTargetCat(""); setMoveTargetSub("");
-  };
-
-  // --- Bulk move ---
-  const submitBulkMove = async () => {
-    if (selectedFileIds.size === 0 || !bulkMoveCat) return;
-    try {
-      const u = await invoke<{ tree: TreeCategory[] }>("bulk_move_files", {
-        fileIds: Array.from(selectedFileIds), targetCategory: bulkMoveCat, targetSubcategory: bulkMoveSub,
-      });
-      updateTree(u);
-      setSelectedFileIds(new Set());
-      setBulkMoveCat(""); setBulkMoveSub("");
-    } catch (e) { setError(String(e)); }
-  };
-
-  // --- Execute moves on disk ---
   const handleExecuteMoves = async () => {
     if (selectedFileIds.size === 0) return;
-    if (!confirm(`Move ${selectedFileIds.size} files on disk? This is irreversible (uses trash for conflicts).`)) return;
+    if (!confirm(`Move ${plural(selectedFileIds.size, "file")} into the new folders on disk? Nothing is overwritten: name clashes get a (2) suffix.`)) return;
     setExecuting(true); setError("");
     try {
       const result = await invoke<{ results: Array<{ file_id: string; status: string; detail?: string }> }>("execute_tree_moves", { approvedFileIds: Array.from(selectedFileIds) });
       const moved = result.results.filter((r) => r.status === "moved").length;
       const errors = result.results.filter((r) => r.status === "error");
-      setExecuteResults(`Moved ${moved} files. ${errors.length > 0 ? `${errors.length} errors.` : ""}`);
+      setExecuteResults(`Moved ${plural(moved, "file")}.${errors.length > 0 ? ` ${plural(errors.length, "file")} couldn’t be moved.` : ""}`);
       setSelectedFileIds(new Set());
     } catch (err) { setError(String(err)); }
     finally { setExecuting(false); }
   };
 
   const handleClearTree = async () => {
-    if (!confirm("Delete the entire categorized tree? This cannot be undone.")) return;
+    if (!confirm("Throw away this proposed tree and start over? Your files on disk are not touched.")) return;
     setError("");
     try {
       await invoke("clear_tree");
       setTree(null);
-      setExpandedCats(new Set());
-      setExpandedSubs(new Set());
-      setAcceptedCats(new Set());
-      setRefusedCats(new Set());
-      setAcceptedSubs(new Set());
-      setRefusedSubs(new Set());
+      setExcluded(new Set());
       setSelectedFileIds(new Set());
+      setExecuteResults(null);
     } catch (err) { setError(String(err)); }
   };
 
+  const hasTree = !!tree && tree.tree.length > 0;
+  const approved = !!tree?.approved_structure;
+  const step = !hasTree ? 0 : approved ? 2 : 1;
+  const scanDisabled = scanning || categorizing || !directory || !backendReady || !canScan;
+  const busy = scanning || categorizing;
+  const summary = tree?.summary;
 
-  // ponytail: render a nested subcategory tree (Law > Cryocare > CIMC > ...)
-  const renderNestedNode = (node: NestedNode, catName: string): JSX.Element => {
-    const subKey = `${catName}::${node.fullPath}`;
-    const subExpanded = expandedSubs.has(subKey);
-    const subAccepted = acceptedSubs.has(subKey);
-    const subRefused = refusedSubs.has(subKey);
-    const isLeaf = node.files && node.files.length > 0;
-    const subIds = isLeaf ? node.files!.map(f => f.file_id) : [];
-    const allSubSelected = subIds.length > 0 && subIds.every(id => selectedFileIds.has(id));
-
-    return (
-      <div key={subKey} className={`content-tree-subcategory${subStateClass(subKey)}`}>
-        <div className="content-tree-subcategory-header" onClick={() => toggleSub(subKey)} style={{ alignItems: 'flex-start' }}>
-          <span className="content-tree-toggle">{subExpanded ? "−" : "+"}</span>
-          <span className="content-tree-icon">{isLeaf ? '📂' : '📁'}</span>
-          {editingSub === subKey ? (
-            <input type="text" value={editSubValue} autoFocus onClick={(e) => e.stopPropagation()}
-              onChange={(e) => setEditSubValue(e.target.value)}
-              onKeyDown={(e) => { if (e.key === "Enter") submitRenameSub(catName, node.fullPath); if (e.key === "Escape") setEditingSub(null); }}
-              style={{ flex: 1, padding: "2px 6px" }} />
-          ) : (
-            <span className="content-tree-name" onDoubleClick={(e) => { e.stopPropagation(); startRenameSub(catName, node.fullPath); }}>
-              {node.name}
-            </span>
-          )}
-          <span className="content-tree-count">{node.count} {node.count === 1 ? "file" : "files"}</span>
-
-          {tree!.approved_structure && isLeaf && (
-            <input type="checkbox" checked={allSubSelected} onClick={(e) => e.stopPropagation()} onChange={() => selectAllInSubByPath(subIds)} title="Select all" />
-          )}
-
-          {!tree!.approved_structure && isLeaf && (
-            <>
-              <button className={`cat-accept-btn${subAccepted ? " active" : ""}`} onClick={(e) => { e.stopPropagation(); acceptSub(subKey); }} title="Accept">✓</button>
-              <button className={`cat-refuse-btn${subRefused ? " active" : ""}`} onClick={(e) => { e.stopPropagation(); refuseSub(subKey); }} title="Refuse">✕</button>
-            </>
-          )}
-
-          {!tree!.approved_structure && isLeaf && (
-            <>
-              <button className="cat-edit-btn" onClick={(e) => { e.stopPropagation(); startRenameSub(catName, node.fullPath); }} title="Rename">✏</button>
-              <button className="cat-edit-btn" onClick={(e) => { e.stopPropagation(); deleteSub(catName, node.fullPath); }} title="Delete">🗑</button>
-            </>
-          )}
-        </div>
-        {subExpanded && (
-          <div className="content-tree-children" style={{ marginLeft: 12 }}>
-            {node.rationale && <div className="content-tree-why">💡 {node.rationale}</div>}
-            {isLeaf && node.files!.map((f) => renderFile(f, catName))}
-            {node.children.map((child) => renderNestedNode(child, catName))}
-          </div>
-        )}
-      </div>
-    );
-  };
-
-  const scanDisabled = scanning || !directory || !backendReady || !canScan;
-  const allCategoryNames = hasTree ? tree!.tree.map(c => c.name).filter(n => n !== "Uncategorized") : [];
-
-  // --- Render helpers ---
-  const catStateClass = (name: string): string => {
-    if (isHoldingCategory(name)) return "";
-    if (acceptedCats.has(name)) return " tree-accepted";
-    if (refusedCats.has(name)) return " tree-refused";
-    return " tree-pending";
-  };
-  const subStateClass = (key: string): string => {
-    if (acceptedSubs.has(key)) return " tree-accepted";
-    if (refusedSubs.has(key)) return " tree-refused";
-    return " tree-pending";
-  };
-
-  // File row render — shared between subcategory files and direct children
-  const renderFile = (f: TreeFile, catName: string) => {
-    const isDirect = !movingFileId || movingFileId === f.file_id;
-    return (
-      <div key={f.file_id} className="content-tree-file">
-        {tree!.approved_structure && (
-          <input type="checkbox" checked={selectedFileIds.has(f.file_id)} onChange={() => toggleFileSelection(f.file_id)} />
-        )}
-        <span className="content-tree-file-icon">📄</span>
-        <span className="content-tree-file-name">{f.filename}</span>
-        <span className="content-tree-file-size">{formatSize(f.size_bytes)}</span>
-        {f.path && <span className="content-tree-file-path">📍 {shortPath(f.path)}</span>}
-        {f.proposed_path && <span className="content-tree-file-proposed">→ {f.proposed_path}</span>}
-        {f.confidence > 0 && (
-          <span className={`confidence ${confidenceClass(f.confidence)}`}>{Math.round(f.confidence * 100)}%</span>
-        )}
-        {tree!.approved_structure && (
-          <button className="file-move-btn" onClick={() => { setMovingFileId(f.file_id); setMoveTargetCat(catName); setMoveTargetSub(""); }}>↗</button>
-        )}
-        {movingFileId === f.file_id && (
-          <div className="move-file-popup">
-            <select value={moveTargetCat} onChange={(e) => setMoveTargetCat(e.target.value)}>
-              <option value="">Select category…</option>
-              {allCategoryNames.map((n) => <option key={n} value={n}>{n}</option>)}
-            </select>
-            <input type="text" placeholder="Sub (optional)" value={moveTargetSub} onChange={(e) => setMoveTargetSub(e.target.value)} />
-            <button onClick={submitMoveFile} disabled={!moveTargetCat}>✓</button>
-            <button onClick={() => setMovingFileId(null)}>✕</button>
-          </div>
-        )}
-      </div>
-    );
-  };
+  const folderPicker = settings && settings.sandbox_folders.length > 0 && (
+    <label className="folder-picker">
+      <Icon name="folder" size={16} />
+      <select value={directory} onChange={(e) => setDirectory(e.target.value)} disabled={busy} aria-label="Folder to scan">
+        {settings.sandbox_folders.map((f) => <option key={f} value={f}>{folderName(f)}</option>)}
+      </select>
+    </label>
+  );
+  const scanLabel = scanning ? "Scanning…" : !backendReady ? "Starting up…" : hasTree ? "Scan for new files" : "Scan folder";
 
   return (
     <div className="scan-view">
-      <h2>📁 Scan Directory</h2>
-
-      {!canScan && <p className="warning">⚠️ Complete the setup wizard and select at least one folder before scanning.</p>}
-
-      <div className="scan-input">
-        {settings && settings.sandbox_folders.length > 0 && (
-          <select value={directory} onChange={(e) => setDirectory(e.target.value)} disabled={scanning}>
-            <option value="">Select a folder to scan…</option>
-            {settings.sandbox_folders.map((f) => <option key={f} value={f}>{f.split('/').pop() || f}</option>)}
-          </select>
-        )}
-        <button onClick={handleScan} disabled={scanDisabled}>
-          {scanning ? "Scanning…" : !backendReady ? "Waiting for backend…" : !canScan ? "No folders selected" : "Scan"}
-        </button>
-      </div>
-
-      {scanning && (
-        <div className="scan-progress-panel">
-          <div className="progress-bar"><div className="progress-fill" style={{ width: `${progress}%` }} /><span className="progress-text">{Math.round(progress)}%</span></div>
-          <div className="scan-progress-stats">
-            <span>📄 {scanCount.toLocaleString()} files scanned</span>
-            {scanEta > 0 && <span>⏱ ~{formatDuration(scanEta)} remaining</span>}
-            {scanElapsed > 0 && <span>🕐 {formatDuration(scanElapsed)} elapsed</span>}
+      <header className="page-head">
+        <div>
+          <h2>Organize</h2>
+          <p className="page-sub">I look at your files, propose a tidy folder tree, and you shape it. Nothing moves on disk until you say so.</p>
+        </div>
+        {hasTree && (
+          <div className="page-head-actions">
+            {folderPicker}
+            <button type="button" className="secondary" onClick={handleScan} disabled={scanDisabled}>
+              <Icon name="refresh" size={14} /> {scanLabel}
+            </button>
           </div>
+        )}
+      </header>
+
+      <Stepper step={step} />
+
+      {!canScan && settings && (
+        <div className="notice warn"><Icon name="info" size={16} /> Pick at least one folder in the setup wizard or Settings before scanning.</div>
+      )}
+      {error && (
+        <div className="notice error" role="alert">
+          <Icon name="info" size={16} /> <span>{error}</span>
+          <button type="button" className="icon-btn" aria-label="Dismiss" onClick={() => setError("")}><Icon name="x" size={12} /></button>
         </div>
       )}
 
-      {error && <div className="error">⚠️ {error}</div>}
+      {/* Step 1: pick a folder and scan */}
+      {!hasTree && !busy && results.length === 0 && (
+        <div className="card hero-card">
+          <span className="hero-icon"><Icon name="broom" size={28} /></span>
+          <h3>Which folder should I tidy?</h3>
+          <p className="muted">I read file names and contents on this computer only. You’ll see the proposed tree before anything changes.</p>
+          <div className="hero-actions">
+            {folderPicker}
+            <button type="button" className="primary" onClick={handleScan} disabled={scanDisabled}>
+              <Icon name="scan" size={16} /> {scanLabel}
+            </button>
+          </div>
+          {scanned && !error && <p className="muted">Everything here is already in the tree. Nothing new to sort.</p>}
+        </div>
+      )}
+
+      {scanning && (
+        <ProgressCard title={<>Scanning <strong>{folderName(directory)}</strong></>} value={progress}
+          stats={[
+            `${scanCount.toLocaleString()} files found`,
+            scanEta > 0 && `about ${formatDuration(scanEta)} left`,
+            scanElapsed > 0 && `${formatDuration(scanElapsed)} so far`,
+          ]} />
+      )}
 
       {results.length > 0 && !categorizing && !showPrefCheck && (
-        <div className="scan-results">
-          <p className="scan-summary">Found <strong>{results.length}</strong> new files to categorize</p>
-          <button className="primary" style={{ marginTop: "12px" }}
-            onClick={() => (prefsAnswered ? handleCategorize() : setShowPrefCheck(true))}>
-            🧠 Categorize with AI
-          </button>
-          {prefsAnswered && (
-            <button className="secondary" style={{ marginTop: "12px", marginLeft: "12px" }} onClick={() => setShowPrefCheck(true)}>
-              ⚙ Change my preferences
+        <div className="card found-card">
+          <div>
+            <h3>Found {plural(results.length, "new file")}</h3>
+            <p className="muted">Next I’ll read them and design a folder tree that fits.{!prefsAnswered && " First, a few quick choices about how you like things arranged."}</p>
+          </div>
+          <div className="found-actions">
+            {prefsAnswered && (
+              <button type="button" className="ghost" onClick={() => setShowPrefCheck(true)}><Icon name="settings" size={14} /> My preferences</button>
+            )}
+            <button type="button" className="primary" onClick={() => (prefsAnswered ? handleCategorize() : setShowPrefCheck(true))}>
+              <Icon name="sparkles" size={16} /> {prefsAnswered ? "Build my tree" : "Continue"}
             </button>
-          )}
+          </div>
         </div>
       )}
 
@@ -723,150 +413,88 @@ export default function ScanView() {
       )}
 
       {categorizing && (
-        <div className="scan-progress-panel">
-          <p className="scan-summary">Analyzing content of <strong>{results.length.toLocaleString()}</strong> files…</p>
-          <div className="progress-bar"><div className="progress-fill" style={{ width: `${categorizeProgress}%` }} /><span className="progress-text">{Math.round(categorizeProgress)}%</span></div>
-          <div className="scan-progress-stats">
-            {catFilesDone > 0 && <span>📄 {catFilesDone.toLocaleString()} / {catFilesTotal.toLocaleString()} files</span>}
-            {catTotalBatches > 1 && <span>📦 Batch {catBatch} / {catTotalBatches}</span>}
-            {catEta > 0 && <span>⏱ ~{formatDuration(catEta)} remaining</span>}
-            {catElapsed > 0 && <span>🕐 {formatDuration(catElapsed)} elapsed</span>}
-          </div>
-        </div>
+        <ProgressCard title={<>Reading {plural(results.length, "file")} and designing your tree</>} value={categorizeProgress}
+          stats={[
+            catFilesDone > 0 && `${catFilesDone.toLocaleString()} / ${catFilesTotal.toLocaleString()} files`,
+            catTotalBatches > 1 && `batch ${catBatch} of ${catTotalBatches}`,
+            catEta > 0 && `about ${formatDuration(catEta)} left`,
+            catElapsed > 0 && `${formatDuration(catElapsed)} so far`,
+          ]} />
       )}
 
-      {/* Persistent Tree Display */}
+      {/* Steps 2 and 3: the tree */}
       {hasTree && (
-        <div className="scan-results">
-          <div className="tree-header">
-            <p className="scan-summary">
-              <strong>{tree!.total_categorized}</strong> of <strong>{tree!.total_files}</strong> files categorized
-              {tree!.approved_structure && <span className="badge-approved"> ✓ Tree approved</span>}
-            </p>
-            {tree!.summary?.before && tree!.summary?.after && (
-              <p className="tree-design-summary">
-                Proposed tree: <strong>{tree!.summary.after.top_level ?? "?"}</strong> top folders,{" "}
-                <strong>{tree!.summary.after.folders}</strong> folders, max depth <strong>{tree!.summary.after.max_depth}</strong>
-                {" "}(today: {tree!.summary.before.folders} folders, depth {tree!.summary.before.max_depth}
-                {tree!.summary.before.loose_files > 0 && <>, {tree!.summary.before.loose_files} loose files</>}).
-                {(tree!.summary.kept_folders ?? 0) > 0 && <> I kept {tree!.summary.kept_folders} of your own folders intact.</>}
-                {(tree!.summary.to_sort ?? 0) > 0 && <> {tree!.summary.to_sort} files had too little signal and wait in “To Sort”.</>}
-              </p>
-            )}
-            {!tree!.approved_structure ? (
-              <>
-                <button className="primary" onClick={approveStructure} disabled={!allCatsDecided} style={{ marginLeft: "12px" }} title={allCatsDecided ? "" : "Accept or refuse all categories first"}>
-                  ✓ Approve Tree Structure
-                </button>
-                <button className="secondary" onClick={handleClearTree} style={{ marginLeft: "12px" }}>
-                  🗑 Clear Tree
-                </button>
-                {!allCatsDecided && <span className="muted" style={{ marginLeft: 8 }}>Review all categories first</span>}
-              </>
-            ) : (
-              <div className="approval-actions">
-                <span className="file-selection-info">{selectedFileIds.size} files selected</span>
-                <button className="primary" onClick={handleExecuteMoves} disabled={selectedFileIds.size === 0 || executing} style={{ marginLeft: "12px" }}>
-                  {executing ? "Moving…" : "📦 Move Files on Disk"}
-                </button>
-              </div>
-            )}
+        <section className="tree-section">
+          <div className="tree-bar">
+            <div className="tree-bar-text">
+              {approved ? (
+                <>
+                  <h3>Pick the files to move</h3>
+                  <p className="muted">Your tree is approved. Choose files on the right, then move them. Files in Uncategorized and To Sort stay put.</p>
+                </>
+              ) : (
+                <>
+                  <h3>Here’s the tree I suggest</h3>
+                  <p className="muted">Rename anything, drag files between folders, or switch off folders you don’t want. When it looks right, approve it.</p>
+                </>
+              )}
+            </div>
+            <div className="tree-bar-actions">
+              {!approved && (
+                <>
+                  <button type="button" className="ghost" onClick={handleClearTree}>Start over</button>
+                  <button type="button" className="primary" onClick={approveStructure} disabled={approving}>
+                    <Icon name="check" size={16} /> {approving ? "Approving…" : "Approve this tree"}
+                  </button>
+                </>
+              )}
+            </div>
           </div>
 
-          {executeResults && <p className="scan-summary" style={{ color: "#4ade80" }}>{executeResults}</p>}
-
-          {/* Bulk move bar — visible when files are selected after approval */}
-          {tree!.approved_structure && selectedFileIds.size > 0 && (
-            <div className="bulk-move-bar">
-              <span>Move {selectedFileIds.size} files to:</span>
-              <select value={bulkMoveCat} onChange={(e) => setBulkMoveCat(e.target.value)}>
-                <option value="">Select category…</option>
-                {allCategoryNames.map((n) => <option key={n} value={n}>{n}</option>)}
-              </select>
-              <input type="text" placeholder="Sub (optional)" value={bulkMoveSub} onChange={(e) => setBulkMoveSub(e.target.value)} />
-              <button onClick={submitBulkMove} disabled={!bulkMoveCat}>Move</button>
-              <button onClick={() => setSelectedFileIds(new Set())}>Clear</button>
+          {summary?.after && (
+            <div className="stats">
+              <div className="stat"><span className="stat-num">{tree!.total_categorized.toLocaleString()}</span><span className="stat-label">files sorted</span></div>
+              <div className="stat"><span className="stat-num">{summary.after.top_level ?? "–"}</span><span className="stat-label">main folders</span></div>
+              <div className="stat">
+                <span className="stat-num">{summary.after.folders}</span>
+                <span className="stat-label">folders{summary.before ? ` (was ${summary.before.folders})` : ""}</span>
+              </div>
+              <div className="stat">
+                <span className="stat-num">{summary.after.max_depth}</span>
+                <span className="stat-label">levels deep{summary.before ? ` (was ${summary.before.max_depth})` : ""}</span>
+              </div>
+              {(summary.kept_folders ?? 0) > 0 && (
+                <div className="stat"><span className="stat-num">{summary.kept_folders}</span><span className="stat-label">of your folders kept</span></div>
+              )}
+              {(summary.to_sort ?? 0) > 0 && (
+                <div className="stat"><span className="stat-num">{summary.to_sort}</span><span className="stat-label">waiting in To Sort</span></div>
+              )}
             </div>
           )}
 
-          <div className="content-tree">
-            {tree!.tree.map((cat) => {
-              const expanded = expandedCats.has(cat.name);
-              const isUncategorized = isHoldingCategory(cat.name);
-              const isAccepted = acceptedCats.has(cat.name);
-              const isRefused = refusedCats.has(cat.name);
-              return (
-                <div key={cat.name} className={`content-tree-category${catStateClass(cat.name)}`}>
-                  <div className="content-tree-category-header" onClick={() => toggleCat(cat.name)}>
-                    <span className="content-tree-toggle">{expanded ? "−" : "+"}</span>
-                    <span className="content-tree-icon">{isUncategorized ? "❓" : "📁"}</span>
-                    {editingCat === cat.name ? (
-                      <input type="text" value={editCatValue} autoFocus onClick={(e) => e.stopPropagation()}
-                        onChange={(e) => setEditCatValue(e.target.value)}
-                        onKeyDown={(e) => { if (e.key === "Enter") submitRenameCat(); if (e.key === "Escape") setEditingCat(null); }}
-                        style={{ flex: 1, padding: "2px 6px" }} />
-                    ) : (
-                      <span className="content-tree-name" title={cat.rationale || ""} onDoubleClick={(e) => { e.stopPropagation(); if (!isUncategorized) startRenameCat(cat.name); }}>
-                        {cat.name}
-                      </span>
-                    )}
-                    <span className="content-tree-count">{cat.count} {cat.count === 1 ? "file" : "files"}</span>
+          {executeResults && <div className="notice success"><Icon name="check" size={16} /> {executeResults}</div>}
+          {!approved && excluded.size > 0 && (
+            <div className="notice"><Icon name="eyeOff" size={16} /> {plural(excluded.size, "folder")} switched off. Their files will stay where they are.</div>
+          )}
 
-                    {/* Accept / Refuse buttons — pre-approval */}
-                    {!isUncategorized && !tree!.approved_structure && (
-                      <>
-                        <button className={`cat-accept-btn${isAccepted ? " active" : ""}`} onClick={(e) => { e.stopPropagation(); acceptCat(cat.name); }} title="Accept">✓</button>
-                        <button className={`cat-refuse-btn${isRefused ? " active" : ""}`} onClick={(e) => { e.stopPropagation(); refuseCat(cat.name); }} title="Refuse">✕</button>
-                      </>
-                    )}
+          <TreeExplorer key={treeKey} tree={tree!.tree} approved={approved}
+            excluded={excluded} onToggleExcluded={toggleExcluded}
+            selectedFiles={selectedFileIds} onSelectFiles={setSelectedFileIds}
+            onTreeChange={(t) => setTree((prev) => (prev ? { ...prev, tree: t } : null))}
+            onError={setError} />
 
-                    {/* Edit buttons */}
-                    {!isUncategorized && tree!.approved_structure && (
-                      <button className="cat-edit-btn" onClick={(e) => { e.stopPropagation(); deleteCat(cat.name); }} title="Delete category">🗑</button>
-                    )}
-                    {!isUncategorized && !tree!.approved_structure && (
-                      <>
-                        <button className="cat-edit-btn" onClick={(e) => { e.stopPropagation(); startRenameCat(cat.name); }} title="Rename">✏</button>
-                        <button className="cat-edit-btn" onClick={(e) => { e.stopPropagation(); setMergingCat(mergingCat === cat.name ? null : cat.name); }} title="Merge into…">🔀</button>
-                        <button className="cat-edit-btn" onClick={(e) => { e.stopPropagation(); deleteCat(cat.name); }} title="Delete">🗑</button>
-                      </>
-                    )}
-
-                    {/* Merge dropdown */}
-                    {mergingCat === cat.name && (
-                      <div className="merge-popup" onClick={(e) => e.stopPropagation()}>
-                        <span>Merge into:</span>
-                        <select defaultValue="" onChange={(e) => { if (e.target.value) submitMerge(cat.name, e.target.value); }}>
-                          <option value="" disabled>Choose target…</option>
-                          {allCategoryNames.filter(n => n !== cat.name).map((n) => <option key={n} value={n}>{n}</option>)}
-                        </select>
-                        <button onClick={() => setMergingCat(null)}>✕</button>
-                      </div>
-                    )}
-                  </div>
-
-                  {expanded && (
-                    <div className="content-tree-children">
-                      {(() => {
-                        const { nodes, directFiles } = buildNestedTree(cat.children);
-                        return (
-                          <>
-                            {nodes.map((node) => renderNestedNode(node, cat.name))}
-                            {directFiles.map((f) => <div key={f.file_id}>{renderFile(f, cat.name)}</div>)}
-                          </>
-                        );
-                      })()}
-                    </div>
-                  )}
-                </div>
-              );
-            })}
-          </div>
-        </div>
-      )}
-
-      {results.length === 0 && scanned && !scanning && !error && !categorizing && !hasTree && (
-        <p style={{ color: "#888", marginTop: "16px" }}>I found nothing to organize.</p>
+          {approved && (
+            <div className="action-bar">
+              <span><strong>{plural(selectedFileIds.size, "file")}</strong> selected</span>
+              {selectedFileIds.size > 0 && <button type="button" className="link-btn" onClick={() => setSelectedFileIds(new Set())}>Clear</button>}
+              <span className="spacer" />
+              <button type="button" className="ghost" onClick={handleClearTree}>Start over</button>
+              <button type="button" className="primary" onClick={handleExecuteMoves} disabled={selectedFileIds.size === 0 || executing}>
+                <Icon name="arrowRight" size={16} /> {executing ? "Moving…" : "Move files on disk"}
+              </button>
+            </div>
+          )}
+        </section>
       )}
     </div>
   );

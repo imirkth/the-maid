@@ -7,6 +7,7 @@ import ApprovalView from "./components/ApprovalView";
 import BucketManager from "./components/BucketManager";
 import FaceClusterView from "./components/FaceClusterView";
 import SettingsPanel from "./components/SettingsPanel";
+import Icon, { type IconName } from "./components/Icon";
 import "./styles.css";
 
 type View = "setup" | "scan" | "approval" | "buckets" | "faces" | "settings";
@@ -21,6 +22,8 @@ function App() {
     const unlisten = listen<boolean>("backend_ready", (e) => {
       setBackendReady(e.payload);
     });
+    // The ready event can fire before this screen listens, so also ask directly
+    invoke("ping_backend").then(() => setBackendReady(true)).catch(() => {});
     return () => { unlisten.then((f) => f()); };
   }, []);
 
@@ -61,31 +64,30 @@ function App() {
   };
 
   if (!loaded) {
-    return <div className="app"><div className="content"><p>Loading…</p></div></div>;
+    return <div className="app"><div className="content app-loading"><span className="spinner" /> Loading…</div></div>;
   }
+
+  const nav: { view: View; label: string; icon: IconName; hint: string }[] = [
+    { view: "scan", label: "Organize", icon: "broom", hint: "Scan a folder and shape its tree" },
+    { view: "approval", label: "Review", icon: "listCheck", hint: "Approve suggested moves" },
+    { view: "buckets", label: "Buckets", icon: "inbox", hint: "Your destination folders" },
+    { view: "faces", label: "Faces", icon: "users", hint: "Group photos by person" },
+    { view: "settings", label: "Settings", icon: "settings", hint: "Folders, models and about" },
+  ];
 
   return (
     <div className="app">
       {!isFirstRun && (
-        <nav className="sidebar">
-          <div className="logo">🧹 The Maid</div>
-          <button onClick={() => setCurrentView("scan")} className={currentView === "scan" ? "active" : ""}>
-            📁 Scan
-          </button>
-          <button onClick={() => setCurrentView("approval")} className={currentView === "approval" ? "active" : ""}>
-            ✅ Approve
-          </button>
-          <button onClick={() => setCurrentView("buckets")} className={currentView === "buckets" ? "active" : ""}>
-            📂 Buckets
-          </button>
-          <button onClick={() => setCurrentView("faces")} className={currentView === "faces" ? "active" : ""}>
-            👤 Faces
-          </button>
-          <button onClick={() => setCurrentView("settings")} className={currentView === "settings" ? "active" : ""}>
-            ⚙️ Settings
-          </button>
-          <div className="backend-status" style={{ marginTop: "auto", padding: "8px", fontSize: "12px" }}>
-            {backendReady ? "🟢 Backend ready" : "🔴 Backend offline"}
+        <nav className="sidebar" aria-label="Main">
+          <div className="logo"><span className="logo-mark"><Icon name="broom" size={18} /></span> The Maid</div>
+          {nav.map((n) => (
+            <button key={n.view} type="button" title={n.hint} onClick={() => setCurrentView(n.view)}
+              className={currentView === n.view ? "active" : ""} aria-current={currentView === n.view ? "page" : undefined}>
+              <Icon name={n.icon} size={17} /> {n.label}
+            </button>
+          ))}
+          <div className={`backend-status${backendReady ? " ready" : ""}`} title={backendReady ? "The local engine is running" : "The local engine is starting or stopped"}>
+            <span className="status-dot" /> {backendReady ? "Ready" : "Starting…"}
           </div>
         </nav>
       )}
