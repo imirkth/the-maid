@@ -137,3 +137,37 @@ def test_api_feedback_flow(messy_drive, tmp_path, monkeypatch):
 
     assert client.post("/tree/feedback", json={"action": "reset"}).json()["pinned_files"] == 0
     assert client.get("/tree/feedback").json()["folders"] == []
+
+
+# --- Tree edit endpoints: regressions found while wiring the new UI ---------
+
+def _edit_client(tmp_path, monkeypatch, tree):
+    import json as _json
+    from fastapi.testclient import TestClient
+    from the_maid import api
+    state = tmp_path / "tree.json"
+    state.write_text(_json.dumps({"tree": tree}))
+    monkeypatch.setattr(api, "TREE_PATH", str(state))
+    return TestClient(api.app)
+
+
+def _direct(i):
+    return {"name": f"f{i}.txt", "file_id": f"f{i}", "filename": f"f{i}.txt", "path": f"/x/f{i}.txt"}
+
+
+def test_bulk_move_moves_every_adjacent_direct_file(tmp_path, monkeypatch):
+    client = _edit_client(tmp_path, monkeypatch, [{"name": "A", "children": [_direct(i) for i in range(4)]}])
+    r = client.put("/tree/bulk-move", json={"file_ids": ["f0", "f1", "f2"], "target_category": "B"}).json()
+    assert r["moved"] == 3
+    a = next(c for c in r["tree"] if c["name"] == "A")
+    assert [c["file_id"] for c in a["children"]] == ["f3"]
+
+
+def test_moves_reuse_an_emptied_subfolder_instead_of_duplicating_it(tmp_path, monkeypatch):
+    tree = [{"name": "A", "children": [{"name": "Sub", "files": []}, _direct(1), _direct(2)]}]
+    client = _edit_client(tmp_path, monkeypatch, tree)
+    client.put("/tree/file", json={"file_id": "f1", "target_category": "A", "target_subcategory": "Sub"})
+    r = client.put("/tree/bulk-move", json={"file_ids": ["f2"], "target_category": "A",
+                                            "target_subcategory": "Sub"}).json()
+    subs = [c for c in r["tree"][0]["children"] if c.get("name") == "Sub"]
+    assert len(subs) == 1 and [f["file_id"] for f in subs[0]["files"]] == ["f1", "f2"]

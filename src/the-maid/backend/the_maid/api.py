@@ -519,6 +519,11 @@ async def edit_category(edit: CategoryEdit):
     _save_tree(data)
     return {"status": "ok", "tree": tree}
 
+def _is_subfolder(child: dict) -> bool:
+    """A sub-folder entry (even an emptied one), as opposed to a direct file entry."""
+    return "files" in child and not child.get("file_id")
+
+
 @app.put("/tree/file")
 async def move_file(move: FileMove):
     """Move a file between categories/subcategories in the tree."""
@@ -556,7 +561,7 @@ async def move_file(move: FileMove):
     if move.target_subcategory:
         target_sub = None
         for child in target_cat["children"]:
-            if child.get("name") == move.target_subcategory and child.get("files"):
+            if child.get("name") == move.target_subcategory and _is_subfolder(child):
                 target_sub = child
                 break
         if not target_sub:
@@ -854,18 +859,21 @@ async def bulk_move_files(req: BulkMoveRequest):
     tree = data.get("tree", [])
     # Collect and remove all target files from their current locations
     found_files = []
+    wanted = set(req.file_ids)
     for cat in tree:
-        for i, child in enumerate(cat.get("children", [])):
-            if child.get("files"):
+        kept_children = []  # rebuilt, never popped while iterating (that skipped neighbours)
+        for child in cat.get("children", []):
+            if _is_subfolder(child):
                 remaining = []
                 for f in child["files"]:
-                    if f.get("file_id") in req.file_ids:
-                        found_files.append(f)
-                    else:
-                        remaining.append(f)
+                    (found_files if f.get("file_id") in wanted else remaining).append(f)
                 child["files"] = remaining
-            elif child.get("file_id") in req.file_ids:
-                found_files.append(cat["children"].pop(i))
+                kept_children.append(child)
+            elif child.get("file_id") in wanted:
+                found_files.append(child)
+            else:
+                kept_children.append(child)
+        cat["children"] = kept_children
     # Find or create target category
     target_cat = None
     for cat in tree:
@@ -878,7 +886,7 @@ async def bulk_move_files(req: BulkMoveRequest):
     if req.target_subcategory:
         target_sub = None
         for child in target_cat["children"]:
-            if child.get("name") == req.target_subcategory and child.get("files"):
+            if child.get("name") == req.target_subcategory and _is_subfolder(child):
                 target_sub = child
                 break
         if not target_sub:
