@@ -80,7 +80,7 @@ function App() {
   const navButton = (n: NavItem) => (
     <button key={n.view} type="button" title={n.hint} onClick={() => setCurrentView(n.view)}
       className={currentView === n.view ? "active" : ""} aria-current={currentView === n.view ? "page" : undefined}>
-      <Icon name={n.icon} size={17} /> {n.label}
+      <Icon name={n.icon} size={16} /> {n.label}
     </button>
   );
   const inMore = more.some((n) => n.view === currentView);

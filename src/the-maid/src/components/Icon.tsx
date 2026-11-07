@@ -24,7 +24,7 @@ const PATHS: Record<string, string> = {
   move: "M5 9V5h4M5 5l6 6M19 15v4h-4m4 0-6-6",
   check: "m5 12 5 5 9-10",
   x: "M6 6l12 12M18 6 6 18",
-  sparkles: "M12 3v4M12 17v4M3 12h4M17 12h4M6 6l2.5 2.5M15.5 15.5 18 18M6 18l2.5-2.5M15.5 8.5 18 6",
+  layers: "m12 3 9 5-9 5-9-5 9-5Zm-9 9 9 5 9-5M3 16l9 5 9-5",
   scan: "M4 8V5a1 1 0 0 1 1-1h3M16 4h3a1 1 0 0 1 1 1v3M20 16v3a1 1 0 0 1-1 1h-3M8 20H5a1 1 0 0 1-1-1v-3M4 12h16",
   listCheck: "M11 6h9M11 12h9M11 18h9M4 6l1.5 1.5L8 5M4 12l1.5 1.5L8 11M4 18l1.5 1.5L8 17",
   users: "M16 20v-1a4 4 0 0 0-4-4H6a4 4 0 0 0-4 4v1M9 11a4 4 0 1 0 0-8 4 4 0 0 0 0 8Zm13 9v-1a4 4 0 0 0-3-3.9M16 3.1a4 4 0 0 1 0 7.8",
@@ -42,7 +42,7 @@ export type IconName = keyof typeof PATHS;
 export default function Icon({ name, size = 16, className = "" }: { name: IconName; size?: number; className?: string }) {
   return (
     <svg className={`icon ${className}`} width={size} height={size} viewBox="0 0 24 24" fill="none"
-      stroke="currentColor" strokeWidth={1.8} strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
+      stroke="currentColor" strokeWidth={1.5} strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
       <path d={PATHS[name]} />
     </svg>
   );

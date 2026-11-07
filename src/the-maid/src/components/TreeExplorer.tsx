@@ -268,9 +268,9 @@ export default function TreeExplorer({
           <button type="button" className={`tree-chevron${n.children.length ? "" : " empty"}`} tabIndex={-1}
             aria-label={isOpen ? "Collapse" : "Expand"}
             onClick={(e) => { e.stopPropagation(); if (n.children.length) toggle(n.id); }}>
-            {n.children.length > 0 && <Icon name={isOpen ? "chevronDown" : "chevronRight"} size={14} />}
+            {n.children.length > 0 && <Icon name={isOpen ? "chevronDown" : "chevronRight"} size={16} />}
           </button>
-          <Icon name={n.holding ? "inbox" : isOpen && n.children.length ? "folderOpen" : "folder"} size={17}
+          <Icon name={n.holding ? "inbox" : isOpen && n.children.length ? "folderOpen" : "folder"} size={16}
             className={`tree-folder-icon depth-${Math.min(n.depth, 3)}`} />
           {renaming?.id === n.id && renaming.where === "tree" ? (
             <RenameField initial={n.name} siblings={siblingsOf(n)}
@@ -282,12 +282,12 @@ export default function TreeExplorer({
           {!n.holding && renamingId !== n.id && (
             <span className="tree-row-actions">
               <button type="button" className="icon-btn" title="Rename (F2)" aria-label={`Rename ${n.name}`}
-                onClick={(e) => { e.stopPropagation(); startRename(n.id); }}><Icon name="pencil" size={14} /></button>
+                onClick={(e) => { e.stopPropagation(); startRename(n.id); }}><Icon name="pencil" size={16} /></button>
               {!approved && (
                 <button type="button" className="icon-btn" aria-label={excluded.has(n.id) ? `Use ${n.name}` : `Don't use ${n.name}`}
                   title={excluded.has(n.id) ? "Use this folder again" : "Don't use this folder (its files stay where they are)"}
                   onClick={(e) => { e.stopPropagation(); onToggleExcluded(n.id); }}>
-                  <Icon name={excluded.has(n.id) ? "eye" : "eyeOff"} size={14} />
+                  <Icon name={excluded.has(n.id) ? "eye" : "eyeOff"} size={16} />
                 </button>
               )}
             </span>
@@ -329,7 +329,7 @@ export default function TreeExplorer({
           </select>
         ) : (
           <button type="button" className="icon-btn file-move" title="Move to another folder" aria-label={`Move ${f.filename}`}
-            onClick={() => setMovingFile(f.file_id)}><Icon name="move" size={14} /></button>
+            onClick={() => setMovingFile(f.file_id)}><Icon name="move" size={16} /></button>
         )}
       </div>
     );
@@ -349,16 +349,16 @@ export default function TreeExplorer({
       <aside className="explorer-side">
         <div className="explorer-toolbar">
           <label className="search-box">
-            <Icon name="search" size={14} />
+            <Icon name="search" size={16} />
             <input type="text" placeholder="Find a folder or file" value={query} onChange={(e) => setQuery(e.target.value)} aria-label="Search the tree" />
             {query && <button type="button" className="icon-btn" aria-label="Clear search" onClick={() => setQuery("")}><Icon name="x" size={12} /></button>}
           </label>
           <button type="button" className="icon-btn" title="Expand all" aria-label="Expand all"
             onClick={() => { const all = new Set<string>(); walk(nodes, (n) => { if (n.children.length) all.add(n.id); }); setExpanded(all); }}>
-            <Icon name="expand" size={14} />
+            <Icon name="expand" size={16} />
           </button>
           <button type="button" className="icon-btn" title="Collapse all" aria-label="Collapse all" onClick={() => setExpanded(new Set())}>
-            <Icon name="collapse" size={14} />
+            <Icon name="collapse" size={16} />
           </button>
         </div>
         <div className="tree-list" role="tree" aria-label="Proposed folders" tabIndex={0} ref={treeRef} onKeyDown={onTreeKey}>
@@ -366,7 +366,7 @@ export default function TreeExplorer({
           {matches && matches.size === 0 && <p className="muted tree-nomatch">Nothing matches “{query}”.</p>}
         </div>
         <p className="explorer-tip">
-          <Icon name="info" size={13} /> Double-click a name to rename it. Drag files or folders onto a folder to move them.
+          <Icon name="info" size={16} /> Double-click a name to rename it. Drag files or folders onto a folder to move them.
         </p>
       </aside>
 
@@ -382,9 +382,11 @@ export default function TreeExplorer({
             ))}
           </nav>
 
-          <header className="pane-head">
-            <span className={`pane-icon${current.holding ? " holding" : ""}`}><Icon name={current.holding ? "inbox" : "folderOpen"} size={22} /></span>
-            <div className="pane-title">
+          {/* The open folder, drawn as a manila folder holding its contents */}
+          <div className={`folder-sheet${current.holding ? " holding" : ""}`}>
+          <header className="folder-head">
+            <div className="folder-tab">
+              {current.holding && <Icon name="inbox" size={16} />}
               {renaming?.id === current.id && renaming.where === "pane" ? (
                 <RenameField large initial={current.name} siblings={siblingsOf(current)}
                   onCommit={(name) => rename(current, name)} onCancel={() => stopRename()} />
@@ -392,32 +394,35 @@ export default function TreeExplorer({
                 <h3 onDoubleClick={() => { if (!current.holding) startRename(current.id, "pane"); }}
                   title={current.holding ? undefined : "Double-click to rename"}>{current.name}</h3>
               )}
+            </div>
+            <div className="folder-front">
               <span className="pane-sub">
                 {plural(current.count, "file")}
                 {current.children.length > 0 && <> · {plural(current.children.length, "folder")}</>}
-                {currentOff && <> · <strong>not used</strong>, files stay where they are</>}
+                {currentOff && <> · not used, files stay where they are</>}
               </span>
-            </div>
-            {!current.holding && (
-              <div className="pane-actions">
-                <button type="button" className="ghost" onClick={() => startRename(current.id, "pane")}><Icon name="pencil" size={14} /> Rename</button>
-                {!approved && (
-                  <button type="button" className="ghost" onClick={() => onToggleExcluded(current.id)}>
-                    <Icon name={excluded.has(current.id) ? "eye" : "eyeOff"} size={14} /> {excluded.has(current.id) ? "Use folder" : "Don’t use"}
+              {!current.holding && (
+                <div className="pane-actions">
+                  <button type="button" className="ghost" onClick={() => startRename(current.id, "pane")}><Icon name="pencil" size={16} /> Rename</button>
+                  {!approved && (
+                    <button type="button" className="ghost" onClick={() => onToggleExcluded(current.id)}>
+                      <Icon name={excluded.has(current.id) ? "eye" : "eyeOff"} size={16} /> {excluded.has(current.id) ? "Use folder" : "Don’t use"}
+                    </button>
+                  )}
+                  <button type="button" className="ghost danger" onClick={() => remove(current)} aria-label={`Remove ${current.name}`}>
+                    <Icon name="trash" size={16} /> Remove
                   </button>
-                )}
-                <button type="button" className="ghost danger" onClick={() => remove(current)} aria-label={`Remove ${current.name}`}>
-                  <Icon name="trash" size={14} /> Remove
-                </button>
-              </div>
-            )}
+                </div>
+              )}
+            </div>
           </header>
+          <div className="folder-body">
 
           {current.holding && (
-            <p className="pane-why"><Icon name="info" size={14} /> These files didn’t have enough to go on. They stay where they are unless you drag them into a folder.</p>
+            <p className="pane-why">These files didn’t have enough to go on. They stay where they are unless you drag them into a folder.</p>
           )}
           {!current.holding && current.rationale && (
-            <p className="pane-why"><Icon name="lightbulb" size={14} /> {current.rationale}</p>
+            <p className="pane-why">{current.rationale}</p>
           )}
 
           {current.children.length > 0 && (
@@ -426,7 +431,6 @@ export default function TreeExplorer({
                 <button type="button" key={c.id} className={`tile${dropId === c.id ? " drop" : ""}${isExcluded(c) ? " off" : ""}`}
                   draggable onDragStart={(e) => dragFolder(e, c)}
                   onClick={() => open(c.id)} {...dropProps(c)}>
-                  <Icon name="folder" size={20} className="tile-icon" />
                   <span className="tile-name">{c.name}</span>
                   <span className="tile-count">{plural(c.count, "file")}</span>
                 </button>
@@ -460,6 +464,8 @@ export default function TreeExplorer({
               onSelectFiles(s);
             }}>{allChecked ? "Unselect all files below" : `Select all ${currentAll.length} files below`}</button>
           )}
+          </div>
+          </div>
         </section>
       )}
     </div>

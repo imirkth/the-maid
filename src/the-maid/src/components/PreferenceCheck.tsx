@@ -48,7 +48,7 @@ export default function PreferenceCheck({ files, directory, onDone, onCancel }: 
     <div className="pref-check">
       <h3>How do you like your files?</h3>
       <p className="muted">A few quick choices, shown on your own files. I’ll remember them for every future scan.</p>
-      {error && <div className="error">⚠️ {error}</div>}
+      {error && <div className="error">{error}</div>}
 
       {choices?.questions.map((q) => (
         <div key={q.id} className="pref-question">

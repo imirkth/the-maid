@@ -405,14 +405,19 @@ export default function ScanView() {
       {/* Step 1: one button */}
       {!hasTree && !busy && !showPrefCheck && results.length === 0 && (
         <div className="card hero-card">
-          <span className="hero-icon"><Icon name="broom" size={28} /></span>
-          <h3>Let’s tidy up</h3>
-          <p className="muted">
-            {names.length > 0 ? <>I’ll look through <strong>{listNames(names)}</strong> and suggest a clean folder tree. </> : null}
-            Everything stays on this computer, and nothing moves until you’ve seen the plan.
-          </p>
+          {names.length > 0 && (
+            <div className="hero-folders" aria-hidden="true">
+              {names.map((n, i) => (
+                <div key={n} className="hero-folder" style={{ zIndex: names.length - i }}>
+                  <span className="hero-folder-tab">{n}</span>
+                </div>
+              ))}
+            </div>
+          )}
+          <h3>{names.length > 0 ? `Sort ${listNames(names)} into one tidy tree` : "Sort your files into one tidy tree"}</h3>
+          <p className="muted">I read your files on this computer, suggest where each one belongs, and wait for your approval before anything moves</p>
           <button type="button" className="primary hero-button" onClick={() => tidy(folders)} disabled={scanDisabled}>
-            <Icon name="sparkles" size={18} /> {tidyLabel}
+            {tidyLabel}
           </button>
           {scanned && !error && <p className="muted hero-note">Everything is already in its place. Nothing new to sort.</p>}
           {oneFolder && <div className="hero-links">{oneFolder}</div>}
@@ -433,12 +438,12 @@ export default function ScanView() {
         <div className="card found-card">
           <div>
             <h3>Found {plural(results.length, "new file")}</h3>
-            <p className="muted">Ready to sort them into your tree.</p>
+            <p className="muted">Ready to sort into your tree</p>
           </div>
           <div className="found-actions">
-            <button type="button" className="ghost" onClick={() => setShowPrefCheck(true)}><Icon name="settings" size={14} /> My preferences</button>
+            <button type="button" className="ghost" onClick={() => setShowPrefCheck(true)}>My preferences</button>
             <button type="button" className="primary" onClick={() => (prefsAnswered ? buildTree(batches) : setShowPrefCheck(true))}>
-              <Icon name="sparkles" size={16} /> Sort them
+              Sort them
             </button>
           </div>
         </div>
@@ -490,26 +495,33 @@ export default function ScanView() {
             </div>
           </div>
 
-          {summary?.after && (
-            <div className="stats">
-              <div className="stat"><span className="stat-num">{tree!.total_categorized.toLocaleString()}</span><span className="stat-label">files sorted</span></div>
-              <div className="stat"><span className="stat-num">{summary.after.top_level ?? "–"}</span><span className="stat-label">main folders</span></div>
-              <div className="stat">
-                <span className="stat-num">{summary.after.folders}</span>
-                <span className="stat-label">folders{summary.before ? ` (was ${summary.before.folders})` : ""}</span>
+          {summary?.after && (() => {
+            const before = summary.before;
+            const after = summary.after!;
+            const fig = (n: number, label: string, was?: number) => (
+              <span className="fig">
+                <span className="fig-num">{n.toLocaleString()}</span>
+                <span className="fig-label">{label}</span>
+                {was !== undefined && <span className="fig-was">was {was.toLocaleString()}</span>}
+              </span>
+            );
+            const notes = [
+              `${plural(tree!.total_categorized, "file")} sorted`,
+              (summary.kept_folders ?? 0) > 0 && `${summary.kept_folders} of your own folders kept`,
+              (summary.to_sort ?? 0) > 0 && `${summary.to_sort} waiting in To Sort`,
+            ].filter(Boolean);
+            return (
+              <div className="compare">
+                <div className="compare-figs">
+                  {fig(after.top_level ?? 0, "main folders")}
+                  {fig(after.folders, "folders in all", before?.folders)}
+                  {fig(after.max_depth, "levels deep", before?.max_depth)}
+                  {before && before.loose_files > 0 && fig(after.loose_files, "loose files", before.loose_files)}
+                </div>
+                <p className="compare-note">{notes.join(" · ")}</p>
               </div>
-              <div className="stat">
-                <span className="stat-num">{summary.after.max_depth}</span>
-                <span className="stat-label">levels deep{summary.before ? ` (was ${summary.before.max_depth})` : ""}</span>
-              </div>
-              {(summary.kept_folders ?? 0) > 0 && (
-                <div className="stat"><span className="stat-num">{summary.kept_folders}</span><span className="stat-label">of your folders kept</span></div>
-              )}
-              {(summary.to_sort ?? 0) > 0 && (
-                <div className="stat"><span className="stat-num">{summary.to_sort}</span><span className="stat-label">waiting in To Sort</span></div>
-              )}
-            </div>
-          )}
+            );
+          })()}
 
           {executeResults && <div className="notice success"><Icon name="check" size={16} /> {executeResults}</div>}
           {!approved && excluded.size > 0 && (
