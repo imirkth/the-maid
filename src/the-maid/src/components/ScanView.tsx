@@ -1,6 +1,7 @@
 import { useState, useEffect, useCallback } from "react";
 import { invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
+import PreferenceCheck from "./PreferenceCheck";
 
 interface FileMeta {
   file_id: string;
@@ -244,6 +245,10 @@ export default function ScanView() {
   const [catElapsed, setCatElapsed] = useState(0);
   const [catEta, setCatEta] = useState(0);
 
+  // Preference check: asked before the first build, re-openable any time
+  const [showPrefCheck, setShowPrefCheck] = useState(false);
+  const [prefsAnswered, setPrefsAnswered] = useState(false);
+
   // Persistent tree state
   const [tree, setTree] = useState<TreeState | null>(null);
   const [expandedCats, setExpandedCats] = useState<Set<string>>(new Set());
@@ -302,6 +307,9 @@ export default function ScanView() {
 
     const unlistenReady = listen<boolean>("backend_ready", (e) => setBackendReady(e.payload));
     invoke("ping_backend").then(() => setBackendReady(true)).catch(() => {});
+    invoke<{ answered?: boolean }>("get_preferences")
+      .then((p) => setPrefsAnswered(!!p.answered))
+      .catch(() => {});
 
     const unlistenProgress = listen<ScanProgress>("scan_progress", (e) => {
       const p = e.payload;
@@ -693,11 +701,25 @@ export default function ScanView() {
 
       {error && <div className="error">⚠️ {error}</div>}
 
-      {results.length > 0 && !categorizing && (
+      {results.length > 0 && !categorizing && !showPrefCheck && (
         <div className="scan-results">
           <p className="scan-summary">Found <strong>{results.length}</strong> new files to categorize</p>
-          <button className="primary" onClick={handleCategorize} style={{ marginTop: "12px" }}>🧠 Categorize with AI</button>
+          <button className="primary" style={{ marginTop: "12px" }}
+            onClick={() => (prefsAnswered ? handleCategorize() : setShowPrefCheck(true))}>
+            🧠 Categorize with AI
+          </button>
+          {prefsAnswered && (
+            <button className="secondary" style={{ marginTop: "12px", marginLeft: "12px" }} onClick={() => setShowPrefCheck(true)}>
+              ⚙ Change my preferences
+            </button>
+          )}
         </div>
+      )}
+
+      {results.length > 0 && !categorizing && showPrefCheck && (
+        <PreferenceCheck files={results} directory={directory}
+          onCancel={() => setShowPrefCheck(false)}
+          onDone={() => { setShowPrefCheck(false); setPrefsAnswered(true); handleCategorize(); }} />
       )}
 
       {categorizing && (
