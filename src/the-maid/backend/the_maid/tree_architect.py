@@ -97,7 +97,7 @@ _KIND_EXT: Dict[str, set] = {
     # Installed program files (a copied "Program Files" folder, MATLAB, Photoshop...)
     "program": {".dll", ".so", ".dylib", ".sys", ".ocx", ".cab", ".msp", ".msm", ".lib", ".pyd",
                 ".jar", ".class", ".8bf", ".aip", ".mexw32", ".mexw64", ".mexa64", ".mexmaci64",
-                ".drv", ".cpl", ".manifest", ".mui", ".tlb", ".olb", ".chm", ".hlp", ".inf"},
+                ".drv", ".cpl", ".mst", ".manifest", ".mui", ".tlb", ".olb", ".chm", ".hlp", ".inf"},
 }
 EXT_KIND: Dict[str, str] = {e: k for k, exts in _KIND_EXT.items() for e in exts}
 
@@ -179,6 +179,12 @@ _PROJECT_MARKER_DIRS = {
     "venv", ".venv", "env", "virtualenv", "site-packages", "dist-packages", "node_modules",
     "__pycache__", ".git", ".idea", ".vscode", ".ipynb_checkpoints",
 }
+
+# Parent folders whose children are all code projects
+# (IDE / code-only names: a plain "Projects" folder can hold anything)
+_CODE_WORKSPACE = re.compile(
+    r"pycharm|intellij|idea|eclipse|vscode|netbeans|androidstudio|xcode|workspace|repos|repositor"
+    r"|github|gitlab|bitbucket|coding|jupyter|^code$|^codes$|^dev$|^src$|^sources?$|^python$|^programming$")
 
 _WORD_RE = re.compile(r"[a-z0-9]+")
 _CAMEL_RE = re.compile(r"(?<=[a-z])(?=[A-Z])")
@@ -444,6 +450,18 @@ def find_project_roots(profiles: List[FileProfile]) -> set:
         if key in _CONTAINER_FOLDERS or (is_generic_folder(name) and name.lower() not in _PROJECT_MARKER_DIRS):
             continue  # "Projects/__pycache__" or "Downloads/venv": not the project itself
         good.add(c)
+    # Siblings of a project inside a code workspace ("PycharmProjects/NN_gene"
+    # next to "PycharmProjects/AI_trading") are projects too, markers or not.
+    children: Dict[Tuple[str, ...], set] = defaultdict(set)
+    for p in profiles:
+        for i in range(1, len(p.rel_dirs)):
+            children[tuple(p.rel_dirs[:i])].add(p.rel_dirs[i])
+    for c in list(good):
+        parent = c[:-1]
+        if parent and _CODE_WORKSPACE.search(re.sub(r"[^a-z]", "", _fold(parent[-1]))):
+            for sib in children.get(parent, ()):
+                if not is_generic_folder(sib) or sib.lower() in _PROJECT_MARKER_DIRS:
+                    good.add(parent + (sib,))
     return {c for c in good if not any(c[:i] in good for i in range(1, len(c)))}
 
 
@@ -1014,8 +1032,9 @@ class TreeArchitect:
                 media_units.append(u)
             elif k == "audio":
                 audio_units.append(u)
-            elif (not u.name and k in {"installer", "archive", "font", "program"}) or (
-                    u.name and sum(f.kind in _SOFTWARE_KINDS for f in u.files) >= 0.3 * u.size):
+            elif (not u.name and k in _SOFTWARE_KINDS) or (
+                    u.name and sum(f.kind in {"installer", "program"} for f in u.files) >= 0.12 * u.size):
+                # a folder of installed programs: few files are binaries (MATLAB, Photoshop)
                 software_units.append(u)
             else:
                 topic_units.append(u)

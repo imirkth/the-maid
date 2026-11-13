@@ -391,3 +391,36 @@ def test_named_installer_folder_goes_to_software(tmp_path):
     files = _scan(root)
     placed = _placements(TreeArchitect(str(root)).build(files), files)
     assert all(v.startswith("Software & Archives/programme") for v in _folder_of(placed, "programme"))
+
+
+def test_sibling_folders_in_a_code_workspace_are_projects(code_drive):
+    for name in ("NN_gene", "kaggle_2_sigma"):
+        for i in range(6):
+            _write(code_drive, f"PycharmProjects/{name}/run_{i}.log", "epoch loss accuracy")
+    files = _scan(code_drive)
+    placed = _placements(TreeArchitect(str(code_drive)).build(files), files)
+    for name in ("NN_gene", "kaggle_2_sigma", "AI_trading"):
+        assert all(v.startswith(f"Code projects/{name}") for v in _folder_of(placed, f"/{name}/")), name
+
+
+def test_plain_projects_folder_does_not_make_everything_code(code_drive):
+    for i in range(5):
+        _write(code_drive, f"Projects/Greenhouse build/plan_{i}.txt", f"greenhouse timber glazing frame {i}")
+    _write(code_drive, "Projects/scraper/requirements.txt", "requests")
+    _write(code_drive, "Projects/scraper/main.py", "import requests")
+    files = _scan(code_drive)
+    placed = _placements(TreeArchitect(str(code_drive)).build(files), files)
+    assert not any(v.startswith("Code projects") for v in _folder_of(placed, "Greenhouse"))
+    assert all(v.startswith("Code projects/scraper") for v in _folder_of(placed, "/scraper/"))
+
+
+def test_zips_and_photos_are_not_a_software_folder(tmp_path):
+    root = tmp_path / "drive"
+    for i in range(4):
+        _write(root, f"Lycée/cours_{i}.zip")
+        _write(root, f"Lycée/photo_classe_{i}.jpg")
+    for i in range(6):
+        _write(root, f"Recipes/recette_{i}.txt", f"{RECIPE} {i}")
+    files = _scan(root)
+    placed = _placements(TreeArchitect(str(root)).build(files), files)
+    assert not any(v.startswith("Software") for v in _folder_of(placed, "Lycée"))
