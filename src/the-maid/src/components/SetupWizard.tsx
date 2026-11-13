@@ -80,7 +80,7 @@ export default function SetupWizard({ onComplete }: Props) {
   // Step 1: Welcome + folder selection
   const renderStep1 = () => (
     <div className="wizard-step">
-      <h2>🧹 Welcome to The Maid</h2>
+      <h2>Set up The Maid</h2>
       <p>Your local, privacy-first file organizer.</p>
       <p>Choose which folders The Maid can access:</p>
       <div className="folder-grid">
@@ -95,8 +95,8 @@ export default function SetupWizard({ onComplete }: Props) {
           </label>
         ))}
       </div>
-      <button onClick={() => setStep(2)} disabled={selectedFolders.length === 0}>
-        Next →
+      <button className="primary" onClick={() => setStep(2)} disabled={selectedFolders.length === 0}>
+        Next
       </button>
     </div>
   );
@@ -104,7 +104,7 @@ export default function SetupWizard({ onComplete }: Props) {
   // Step 2: Feature selection
   const renderStep2 = () => (
     <div className="wizard-step">
-      <h2>🧩 Choose Features</h2>
+      <h2>Choose what to sort</h2>
       <p>Select which capabilities to install. You can change these later.</p>
       <div className="feature-grid">
         <label className={`feature-card ${features.general_files ? "selected" : ""}`}>
@@ -114,7 +114,7 @@ export default function SetupWizard({ onComplete }: Props) {
             onChange={(e) => setFeatures({ ...features, general_files: e.target.checked })}
           />
           <div className="feature-info">
-            <strong>📁 General Files</strong>
+            <strong>Everyday files</strong>
             <p>Sort documents, images, videos, archives. Always recommended.</p>
             <span className="model-size">~500MB · bundled</span>
           </div>
@@ -126,7 +126,7 @@ export default function SetupWizard({ onComplete }: Props) {
             onChange={(e) => setFeatures({ ...features, pdf_ocr: e.target.checked })}
           />
           <div className="feature-info">
-            <strong>📄 PDF OCR</strong>
+            <strong>Scanned PDFs</strong>
             <p>Read text from scanned PDFs for smart categorization.</p>
             <span className="model-size">~1GB download</span>
           </div>
@@ -138,16 +138,16 @@ export default function SetupWizard({ onComplete }: Props) {
             onChange={(e) => setFeatures({ ...features, face_clustering: e.target.checked })}
           />
           <div className="feature-info">
-            <strong>👤 Face Clustering</strong>
+            <strong>Faces in photos</strong>
             <p>Group photos by person and name them. All offline.</p>
             <span className="model-size">~100MB download</span>
           </div>
         </label>
       </div>
       <div className="wizard-nav">
-        <button onClick={() => setStep(1)}>← Back</button>
-        <button onClick={() => setStep(3)} disabled={!canAdvanceFromStep2(features)}>
-          Next →
+        <button onClick={() => setStep(1)}>Back</button>
+        <button className="primary" onClick={() => setStep(3)} disabled={!canAdvanceFromStep2(features)}>
+          Next
         </button>
       </div>
     </div>
@@ -184,7 +184,7 @@ export default function SetupWizard({ onComplete }: Props) {
             <strong>{MODELS.text.name}</strong>
             <span className="model-size">~{MODELS.text.size}MB · bundled</span>
           </div>
-          <div className="download-status done">✓ Included</div>
+          <div className="download-status done">Included</div>
         </div>
 
         {/* PDF OCR */}
@@ -205,7 +205,7 @@ export default function SetupWizard({ onComplete }: Props) {
                 <span>{Math.round(downloads.pdf.progress)}%</span>
               </div>
             )}
-            {downloads.pdf.state === "done" && <div className="download-status done">✓ Done</div>}
+            {downloads.pdf.state === "done" && <div className="download-status done">Done</div>}
             {downloads.pdf.state === "skipped" && <div className="download-status skipped">Skipped</div>}
           </div>
         )}
@@ -228,7 +228,7 @@ export default function SetupWizard({ onComplete }: Props) {
                 <span>{Math.round(downloads.face.progress)}%</span>
               </div>
             )}
-            {downloads.face.state === "done" && <div className="download-status done">✓ Done</div>}
+            {downloads.face.state === "done" && <div className="download-status done">Done</div>}
             {downloads.face.state === "skipped" && <div className="download-status skipped">Skipped</div>}
           </div>
         )}
@@ -243,12 +243,12 @@ export default function SetupWizard({ onComplete }: Props) {
       </div>
 
       <div className="wizard-nav">
-        <button onClick={() => setStep(2)}>← Back</button>
+        <button onClick={() => setStep(2)}>Back</button>
         <button
           onClick={() => setStep(4)}
           disabled={!isDownloadComplete()}
         >
-          {isDownloadComplete() ? "Next →" : "Waiting for downloads…"}
+          {isDownloadComplete() ? "Next" : "Waiting for downloads…"}
         </button>
       </div>
     </div>
@@ -270,7 +270,7 @@ export default function SetupWizard({ onComplete }: Props) {
 
   const renderStep4 = () => (
     <div className="wizard-step">
-      <h2>🚀 Ready to Clean</h2>
+      <h2>Ready to tidy</h2>
       <p>The Maid will scan your selected folders and propose an organization plan.</p>
       <p><strong>Remember:</strong> Nothing moves until you approve it.</p>
 
@@ -284,10 +284,10 @@ export default function SetupWizard({ onComplete }: Props) {
         ].filter(Boolean).join(", ") || "None"}</p>
       </div>
 
-      {error && <div className="error">⚠️ {error}</div>}
+      {error && <div className="error">{error}</div>}
 
       <div className="wizard-nav">
-        <button onClick={() => setStep(3)} disabled={saving}>← Back</button>
+        <button onClick={() => setStep(3)} disabled={saving}>Back</button>
         <button onClick={handleComplete} className="primary" disabled={saving}>
           {saving ? "Saving…" : "Start First Scan"}
         </button>

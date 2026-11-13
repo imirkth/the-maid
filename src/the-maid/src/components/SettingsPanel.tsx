@@ -1,5 +1,6 @@
 import { useState, useEffect } from "react";
 import { invoke } from "@tauri-apps/api/core";
+import Icon from "./Icon";
 import { open } from "@tauri-apps/plugin-shell";
 import { useDonation } from "../hooks/useDonation";
 import {
@@ -96,25 +97,25 @@ export default function SettingsPanel() {
 
   return (
     <div className="settings-panel">
-      <h2>⚙️ Settings</h2>
+      <h2>Settings</h2>
 
       <div className="settings-tabs">
         <button
           className={section === "folders" ? "active" : ""}
           onClick={() => setSection("folders")}
-        >📁 Folders</button>
+        ><Icon name="folder" size={16} /> Folders</button>
         <button
           className={section === "models" ? "active" : ""}
           onClick={() => setSection("models")}
-        >🧩 Models</button>
+        ><Icon name="layers" size={16} /> Models</button>
         <button
           className={section === "updates" ? "active" : ""}
           onClick={() => setSection("updates")}
-        >🔄 Updates</button>
+        ><Icon name="refresh" size={16} /> Updates</button>
         <button
           className={section === "about" ? "active" : ""}
           onClick={() => setSection("about")}
-        >ℹ️ About</button>
+        ><Icon name="info" size={16} /> About</button>
       </div>
 
       {section === "folders" && (
@@ -138,7 +139,7 @@ export default function SettingsPanel() {
             />
             <button onClick={addFolder}>Add</button>
           </div>
-          {folderError && <div className="error">⚠️ {folderError}</div>}
+          {folderError && <div className="error">{folderError}</div>}
         </section>
       )}
 
@@ -157,7 +158,7 @@ export default function SettingsPanel() {
                   <span className="model-size">~{m.size_mb} MB</span>
                 </div>
                 <div className={m.downloaded ? "model-status done" : "model-status idle"}>
-                  {m.downloaded ? "✓ Downloaded" : "Not downloaded"}
+                  {m.downloaded ? "Downloaded" : "Not downloaded"}
                 </div>
               </div>
             ))}
@@ -175,7 +176,7 @@ export default function SettingsPanel() {
           </button>
 
           {updateError && (
-            <div className="error">⚠️ {updateError}</div>
+            <div className="error">{updateError}</div>
           )}
 
           {updateInfo && !updateError && (
@@ -183,7 +184,7 @@ export default function SettingsPanel() {
               <p>Latest version: <strong>v{updateInfo.latest_version}</strong></p>
               {updateInfo.update_available ? (
                 <div>
-                  <p className="update-available">✨ A new version is available!</p>
+                  <p className="update-available">A new version is available</p>
                   {updateInfo.upgrade_price != null && (
                     <p>Upgrade price: ${updateInfo.upgrade_price.toFixed(2)}</p>
                   )}
@@ -195,7 +196,7 @@ export default function SettingsPanel() {
                   )}
                 </div>
               ) : (
-                <p className="up-to-date">✓ You're up to date!</p>
+                <p className="up-to-date"><Icon name="check" size={16} /> You’re up to date</p>
               )}
             </div>
           )}
@@ -223,11 +224,11 @@ export default function SettingsPanel() {
                 disabled={donationLoading || paid}
               />
               <button onClick={createInvoice} disabled={donationLoading || paid}>
-                {donationLoading ? "Creating…" : paid ? "Paid ✓" : "Generate Invoice"}
+                {donationLoading ? "Creating…" : paid ? "Paid" : "Generate invoice"}
               </button>
             </div>
 
-            {donationError && <div className="error">⚠️ {donationError}</div>}
+            {donationError && <div className="error">{donationError}</div>}
 
             {invoice && !paid && (
               <div className="donation-invoice">
@@ -247,7 +248,7 @@ export default function SettingsPanel() {
 
             {paid && (
               <div className="donation-thank-you">
-                <p>✨ Thank you for supporting The Maid!</p>
+                <p>Thank you for supporting The Maid</p>
                 <p>Payment confirmed.</p>
               </div>
             )}
@@ -260,7 +261,7 @@ export default function SettingsPanel() {
               If you find it useful, consider supporting:
             </p>
             <button onClick={openDonate} className="donate-btn">
-              💝 Support The Maid
+              Support The Maid
             </button>
           </div>
 
@@ -273,10 +274,12 @@ export default function SettingsPanel() {
 
           <div className="about-section">
             <h4>Privacy</h4>
-            <p>✓ All processing is local</p>
-            <p>✓ Zero cloud uploads</p>
-            <p>✓ No telemetry or tracking</p>
-            <p>✓ Metadata stays in your files (IPTC/XMP)</p>
+            <ul className="check-list">
+              <li><Icon name="check" size={16} /> All processing happens on this computer</li>
+              <li><Icon name="check" size={16} /> Nothing is uploaded</li>
+              <li><Icon name="check" size={16} /> No telemetry or tracking</li>
+              <li><Icon name="check" size={16} /> Metadata stays in your files (IPTC/XMP)</li>
+            </ul>
           </div>
         </section>
       )}

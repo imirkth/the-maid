@@ -169,8 +169,8 @@ export default function ApprovalView() {
   if (!plan || items.length === 0) {
     return (
       <div className="approval-view">
-        <h2>✅ Review & Approve</h2>
-        <p className="empty-state">No proposals yet. Run a scan first.</p>
+        <h2>Review moves</h2>
+        <p className="empty-state">No moves to review yet. Tidy your folders from Organize first.</p>
       </div>
     );
   }
@@ -178,7 +178,7 @@ export default function ApprovalView() {
   return (
     <div className="approval-view">
       <div className="approval-header">
-        <h2>✅ Review & Approve</h2>
+        <h2>Review moves</h2>
         <div className="approval-controls">
           <label className="advanced-toggle">
             <input
@@ -262,7 +262,7 @@ export default function ApprovalView() {
                       <button className="small" onClick={cancelEdit}>Cancel</button>
                       {editError && (
                         <span id="edit-error" className="edit-error" role="alert">
-                          ⚠️ {editError}
+                          {editError}
                         </span>
                       )}
                     </div>
@@ -361,7 +361,7 @@ export default function ApprovalView() {
                   </div>
                 )}
 
-                <p className="rationale">💡 {item.rationale}</p>
+                <p className="rationale">{item.rationale}</p>
               </div>
             ))}
           </div>

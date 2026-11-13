@@ -30,7 +30,7 @@ export default function BucketManager() {
 
   return (
     <div className="bucket-manager">
-      <h2>📂 Bucket Manager</h2>
+      <h2>Buckets</h2>
       <p>These are the approved destination folders for file organization.</p>
 
       <ul className="bucket-list">
@@ -41,7 +41,7 @@ export default function BucketManager() {
               <br />
               <code>{b.path}</code>
             </div>
-            <button onClick={() => removeBucket(b.id)} className="danger">
+            <button onClick={() => removeBucket(b.id)} className="ghost danger">
               Remove
             </button>
           </li>
@@ -49,7 +49,7 @@ export default function BucketManager() {
       </ul>
 
       <div className="add-bucket">
-        <h3>Add New Bucket</h3>
+        <h3>Add a bucket</h3>
         <input
           type="text"
           placeholder="Name (e.g., Work Documents)"
@@ -62,7 +62,7 @@ export default function BucketManager() {
           value={newPath}
           onChange={(e) => setNewPath(e.target.value)}
         />
-        <button onClick={addBucket}>Add Bucket</button>
+        <button onClick={addBucket}>Add bucket</button>
       </div>
     </div>
   );
