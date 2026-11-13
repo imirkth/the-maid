@@ -466,6 +466,39 @@ pub async fn get_tree_choices(files: Vec<serde_json::Value>, directory: Option<S
     resp.json().await.map_err(|e| format!("Failed to parse tree choices: {}", e))
 }
 
+// --- Learning from tree edits (rules the builder follows on every rebuild) ---
+
+/// feedback: {"action": "pin"|"unpin"|"exclude"|"include"|"rename"|"reset",
+///            "path": "Cat/sub", "new_path": "...", "file_ids": [...], "files": [...]}
+#[tauri::command]
+pub async fn record_tree_feedback(feedback: serde_json::Value) -> Result<serde_json::Value, String> {
+    let resp = preferences_client(10)?
+        .post("http://127.0.0.1:9473/tree/feedback")
+        .json(&feedback)
+        .send()
+        .await
+        .map_err(|e| format!("Failed to reach Python backend: {}", e))?;
+    if !resp.status().is_success() {
+        let status = resp.status();
+        let text = resp.text().await.unwrap_or_default();
+        return Err(format!("Python backend error ({}): {}", status, text));
+    }
+    resp.json().await.map_err(|e| format!("Failed to parse feedback response: {}", e))
+}
+
+#[tauri::command]
+pub async fn get_tree_feedback() -> Result<serde_json::Value, String> {
+    let resp = preferences_client(10)?
+        .get("http://127.0.0.1:9473/tree/feedback")
+        .send()
+        .await
+        .map_err(|e| format!("Failed to reach Python backend: {}", e))?;
+    if !resp.status().is_success() {
+        return Err(format!("Python backend error: {}", resp.status()));
+    }
+    resp.json().await.map_err(|e| format!("Failed to parse feedback response: {}", e))
+}
+
 // --- Persistent Tree Commands ---
 
 #[tauri::command]

@@ -290,6 +290,8 @@ fn main() {
             commands::get_preferences,
             commands::save_preferences,
             commands::get_tree_choices,
+            commands::record_tree_feedback,
+            commands::get_tree_feedback,
             commands::get_tree,
             commands::save_tree,
             commands::merge_tree,

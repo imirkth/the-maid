@@ -6,7 +6,7 @@ Handles all requests from Tauri frontend.
 from fastapi import FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel, Field
-from typing import List, Optional
+from typing import List, Literal, Optional
 import json
 import os
 
@@ -15,6 +15,7 @@ from .sandbox import validate_path
 from .models import LLMManager
 from .tree_architect import TO_SORT, TreeArchitect, TreeRouter, load_model
 from .preferences import Preferences, load_preferences, save_preferences
+from .feedback import ACTIONS as FEEDBACK_ACTIONS, clean_folder_path, load_feedback, save_feedback
 from .face_detector import FaceDetector, detect_faces_for_scan
 from .face_cluster import FaceClusterer, cluster_faces_from_scan
 from .face_tagger import rename_cluster_with_tags, get_clusters_for_ui
@@ -200,7 +201,7 @@ async def categorize_files(request: CategorizeRequest):
     # Design the tree
     _cat_start = _time.monotonic()
     result = llm.categorize_all(files, _sandbox_folders(), scan_root=request.directory,
-                               prefs=load_preferences())
+                               prefs=load_preferences(), feedback=load_feedback())
     _cat_elapsed = _time.monotonic() - _cat_start
 
     # Emit completion
@@ -518,6 +519,11 @@ async def edit_category(edit: CategoryEdit):
     _save_tree(data)
     return {"status": "ok", "tree": tree}
 
+def _is_subfolder(child: dict) -> bool:
+    """A sub-folder entry (even an emptied one), as opposed to a direct file entry."""
+    return "files" in child and not child.get("file_id")
+
+
 @app.put("/tree/file")
 async def move_file(move: FileMove):
     """Move a file between categories/subcategories in the tree."""
@@ -555,7 +561,7 @@ async def move_file(move: FileMove):
     if move.target_subcategory:
         target_sub = None
         for child in target_cat["children"]:
-            if child.get("name") == move.target_subcategory and child.get("files"):
+            if child.get("name") == move.target_subcategory and _is_subfolder(child):
                 target_sub = child
                 break
         if not target_sub:
@@ -631,6 +637,7 @@ async def execute_moves(approved_file_ids: List[str]):
     if fallback_root and os.path.isfile(fallback_root):
         fallback_root = os.path.dirname(fallback_root)
     results = []
+    moved_paths = []
     for cat_name, sub_name, f in entries:
         fid = f.get("file_id", "")
         if fid not in approved or cat_name in ("Uncategorized", TO_SORT):
@@ -653,12 +660,17 @@ async def execute_moves(approved_file_ids: List[str]):
             dest = _unique_dest(dest)
             shutil.move(src, dest)
             f["path"] = dest
+            moved_paths.append((src, dest))
             results.append({"file_id": fid, "status": "moved", "dest": dest})
             _prune_empty_dirs(os.path.dirname(src), root)
         except Exception as e:
             results.append({"file_id": fid, "status": "error", "detail": str(e)})
-    if any(r["status"] == "moved" for r in results):
+    if moved_paths:
         _save_tree(data)  # keep tree paths in sync with disk
+        fb = load_feedback()  # and keep the user's rules attached to the moved files
+        for old, new in moved_paths:
+            fb.file_moved(old, new)
+        save_feedback(fb)
     return {"results": results}
 
 
@@ -695,6 +707,74 @@ async def tree_choices(request: CategorizeRequest):
             f["exif"] = extract_exif(f.get("path", ""))
     architect = TreeArchitect(request.directory, prefs=load_preferences())
     return architect.preview_choices(files)
+
+
+class FeedbackRequest(BaseModel):
+    action: Literal["pin", "unpin", "exclude", "include", "rename", "reset"]
+    path: str = ""            # folder path in the tree: "Category/sub/path"
+    new_path: str = ""        # rename only
+    file_ids: List[str] = []  # files from the current tree...
+    files: List[str] = []     # ...or absolute file paths
+
+
+def _tree_folder_files(folder: str) -> List[str]:
+    """Paths of the files currently in a tree folder (and the folders below it)."""
+    folder = clean_folder_path(folder)
+    out = []
+    for cat, sub, f in _tree_file_entries(_load_tree().get("tree", [])):
+        here = clean_folder_path(f"{cat}/{sub}" if sub else cat)
+        if f.get("path") and (here == folder or here.startswith(folder + "/")):
+            out.append(f["path"])
+    return out
+
+
+@app.post("/tree/feedback")
+async def record_feedback(req: FeedbackRequest):
+    """Record a tree edit as a rule the builder follows on every rebuild.
+
+    pin      path + files/file_ids — these files belong in this folder; with no
+             files, pins everything currently in that folder ("accept folder").
+    unpin    files, or a whole folder via path — let the builder decide again.
+    exclude  files — leave them out of the plan; include undoes it.
+    rename   path -> new_path — moves the folder's pins and pins its files.
+    reset    forget every rule.
+    """
+    assert req.action in FEEDBACK_ACTIONS
+    files = list(req.files)
+    if req.file_ids:
+        by_id = {f.get("file_id"): f.get("path") for _, _, f in _tree_file_entries(_load_tree().get("tree", []))}
+        missing = [i for i in req.file_ids if not by_id.get(i)]
+        if missing:
+            raise HTTPException(status_code=400, detail=f"unknown file ids: {', '.join(missing[:5])}")
+        files += [by_id[i] for i in req.file_ids]
+    if req.action in ("pin", "rename") and not files and req.path:
+        files = _tree_folder_files(req.path)
+    sandbox = _sandbox_folders()
+    for f in files:
+        try:
+            validate_path(f, sandbox)
+        except ValueError as e:
+            raise HTTPException(status_code=400, detail=str(e))
+    fb = load_feedback()
+    try:
+        fb.apply(req.action, files, req.path, req.new_path)
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+    save_feedback(fb)
+    return _feedback_view(fb)
+
+
+@app.get("/tree/feedback")
+async def get_feedback():
+    return _feedback_view(load_feedback())
+
+
+def _feedback_view(fb) -> dict:
+    return {
+        "folders": [{"path": k, "files": len(v)} for k, v in sorted(fb.folders().items())],
+        "pinned_files": len(fb.pins),
+        "excluded_files": len(fb.excluded),
+    }
 
 
 class RouteRequest(BaseModel):
@@ -779,18 +859,21 @@ async def bulk_move_files(req: BulkMoveRequest):
     tree = data.get("tree", [])
     # Collect and remove all target files from their current locations
     found_files = []
+    wanted = set(req.file_ids)
     for cat in tree:
-        for i, child in enumerate(cat.get("children", [])):
-            if child.get("files"):
+        kept_children = []  # rebuilt, never popped while iterating (that skipped neighbours)
+        for child in cat.get("children", []):
+            if _is_subfolder(child):
                 remaining = []
                 for f in child["files"]:
-                    if f.get("file_id") in req.file_ids:
-                        found_files.append(f)
-                    else:
-                        remaining.append(f)
+                    (found_files if f.get("file_id") in wanted else remaining).append(f)
                 child["files"] = remaining
-            elif child.get("file_id") in req.file_ids:
-                found_files.append(cat["children"].pop(i))
+                kept_children.append(child)
+            elif child.get("file_id") in wanted:
+                found_files.append(child)
+            else:
+                kept_children.append(child)
+        cat["children"] = kept_children
     # Find or create target category
     target_cat = None
     for cat in tree:
@@ -803,7 +886,7 @@ async def bulk_move_files(req: BulkMoveRequest):
     if req.target_subcategory:
         target_sub = None
         for child in target_cat["children"]:
-            if child.get("name") == req.target_subcategory and child.get("files"):
+            if child.get("name") == req.target_subcategory and _is_subfolder(child):
                 target_sub = child
                 break
         if not target_sub:
