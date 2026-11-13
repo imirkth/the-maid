@@ -278,3 +278,64 @@ def test_execute_never_overwrites(tmp_path, monkeypatch):
     r = TestClient(api.app).post("/tree/execute", json=["f1"]).json()["results"][0]
     assert r["status"] == "moved" and r["dest"].endswith("a (2).txt")
     assert (root / "Tax/a.txt").read_text() == "existing"
+
+
+# --- Projects stay whole ("the deeper the path, the stronger the signal") ---
+
+@pytest.fixture
+def code_drive(tmp_path):
+    root = tmp_path / "home"
+    proj = "PycharmProjects/AI_trading"
+    _write(root, f"{proj}/requirements.txt", "tensorflow\nscikit-learn\npandas")
+    _write(root, f"{proj}/train.py", "import tensorflow as tf\nmodel = tf.keras.Sequential()")
+    _write(root, f"{proj}/data/btcusd_4h.csv", "date,open,high,low,close")
+    _write(root, f"{proj}/data/btcusd_1d.csv", "date,open,high,low,close")
+    for name in ("scaler.pkl", "scaler_4hr.pkl", "scaler_4hrs.pkl"):
+        _write(root, f"{proj}/data/{name}")
+    # A venv bigger than the rest of the drive: must not become its own topics
+    for pkg in ("tensorflow", "numpy", "setuptools", "termcolor"):
+        for i in range(40):
+            _write(root, f"{proj}/venv/lib/python3.12/site-packages/{pkg}/mod_{i}.py",
+                   f"# {pkg} internals {i}\nimport {pkg}")
+            _write(root, f"{proj}/venv/lib/python3.12/site-packages/{pkg}/__pycache__/mod_{i}.cpython-312.pyc")
+    for i in range(6):
+        _write(root, f"Documents/Taxes/tax_{i}.txt", f"{TAX} {2018 + i}")
+        _write(root, f"Recipes/recette_{i}.txt", f"{RECIPE} cake {i}")
+    return root
+
+
+def test_project_folder_is_one_unit_even_when_huge(code_drive):
+    files = _scan(code_drive)
+    profiles = [profile_file(i, f, str(code_drive)) for i, f in enumerate(files)]
+    units = build_units(profiles)
+    proj = [u for u in units if u.name == "AI_trading"]
+    assert len(proj) == 1 and proj[0].project
+    assert proj[0].size == sum(1 for f in files if "AI_trading" in f["path"])
+
+
+def test_project_keeps_its_inner_structure(code_drive):
+    files = _scan(code_drive)
+    result = TreeArchitect(str(code_drive)).build(files)
+    placed = _placements(result, files)
+    homes = {v.split("AI_trading")[0] for k, v in placed.items() if "AI_trading" in k}
+    assert len(homes) == 1, f"project split across {homes}"
+    scalers = _folder_of(placed, "scaler")
+    assert len(scalers) == 1 and next(iter(scalers)).endswith("AI_trading/data")
+    assert all(v.endswith("__pycache__") for k, v in placed.items() if k.endswith(".pyc"))
+
+
+def test_files_under_a_big_named_folder_stay_with_it(tmp_path):
+    """Generic sub-folders of a too-big folder fall back to that folder, not to loose files."""
+    root = tmp_path / "drive"
+    for i in range(30):
+        _write(root, f"Thesis/Chapter one/part_{i}.txt", f"{COURSE} chapter one {i}")
+        _write(root, f"Thesis/Chapter two/part_{i}.txt", f"{COURSE} chapter two {i}")
+    for i in range(4):
+        _write(root, f"Thesis/data/sample_{i}.csv", "a,b,c")
+    for i in range(6):
+        _write(root, f"Recipes/recette_{i}.txt", f"{RECIPE} {i}")
+    files = _scan(root)
+    profiles = [profile_file(i, f, str(root)) for i, f in enumerate(files)]
+    units = build_units(profiles)
+    data = [u for u in units if any("sample_" in f.filename for f in u.files)]
+    assert len(data) == 1 and data[0].name == "Thesis" and data[0].size == 4

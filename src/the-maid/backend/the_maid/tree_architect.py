@@ -152,6 +152,18 @@ pro professional school ecole university uni courses cours family famille admin 
 papers papiers business companies company societes
 """.split())
 
+# A folder holding one of these is a project: everything under it stays together,
+# however big it is (a venv or node_modules can hold thousands of files).
+_PROJECT_MARKER_FILES = {
+    "requirements.txt", "setup.py", "setup.cfg", "pyproject.toml", "pipfile", "environment.yml",
+    "package.json", "cargo.toml", "go.mod", "pom.xml", "build.gradle", "cmakelists.txt",
+    "makefile", ".gitignore", "readme.md", "manage.py", "dockerfile", "docker-compose.yml",
+}
+_PROJECT_MARKER_DIRS = {
+    "venv", ".venv", "env", "virtualenv", "site-packages", "dist-packages", "node_modules",
+    "__pycache__", ".git", ".idea", ".vscode", ".ipynb_checkpoints",
+}
+
 _WORD_RE = re.compile(r"[a-z0-9]+")
 _CAMEL_RE = re.compile(r"(?<=[a-z])(?=[A-Z])")
 _DATE_IN_NAME = re.compile(r"(?<!\d)((?:19|20)\d{2})[-_.]?(0[1-9]|1[0-2])[-_.]?(0[1-9]|[12]\d|3[01])(?!\d)")
@@ -277,6 +289,7 @@ class Unit:
     files: List[FileProfile]
     name: str = ""                 # folder name when the unit is a kept folder
     base_dirs: List[str] = field(default_factory=list)  # rel dirs of the kept folder
+    project: bool = False          # a project folder: its inner structure is kept as-is
     vec: Vec = field(default_factory=dict)
 
     @property
@@ -387,7 +400,39 @@ def profile_file(idx: int, f: Dict[str, Any], scan_root: str,
 # Units: keep curated folders whole, dissolve dump folders
 # ---------------------------------------------------------------------------
 
+def find_project_roots(profiles: List[FileProfile]) -> set:
+    """Folders that look like a project (code markers inside).
+
+    Only the outermost one on a path counts, so a venv's packages stay inside
+    the project that owns the venv.
+    """
+    candidates = set()
+    for p in profiles:
+        dirs = p.rel_dirs
+        if dirs and p.filename.lower() in _PROJECT_MARKER_FILES:
+            candidates.add(tuple(dirs))
+        for j, d in enumerate(dirs):
+            if d.lower() in _PROJECT_MARKER_DIRS:
+                candidates.add(tuple(dirs[:j]) if j > 0 else tuple(dirs[:1]))
+                break
+    good = set()
+    for c in candidates:
+        name = c[-1]
+        key = re.sub(r"[^a-z]", "", _fold(name))
+        if key in _CONTAINER_FOLDERS or (is_generic_folder(name) and name.lower() not in _PROJECT_MARKER_DIRS):
+            continue  # "Projects/__pycache__" or "Downloads/venv": not the project itself
+        good.add(c)
+    return {c for c in good if not any(c[:i] in good for i in range(1, len(c)))}
+
+
 def build_units(profiles: List[FileProfile]) -> List[Unit]:
+    """Group files into blocks that are placed whole.
+
+    The deeper a file's named folder, the more it says: a file is kept with its
+    nearest meaningful folder rather than scattered on its own, and anything
+    inside a project folder stays in that project.
+    """
+    projects = find_project_roots(profiles)
     total = len(profiles)
     cap = max(UNIT_MAX_FILES_FLOOR, int(total * UNIT_MAX_SHARE))
 
@@ -402,8 +447,11 @@ def build_units(profiles: List[FileProfile]) -> List[Unit]:
                 child_dirs[tuple(p.rel_dirs[:i])].add(p.rel_dirs[i])
 
     def unit_key_for(p: FileProfile) -> Optional[Tuple[str, ...]]:
+        skipped: Optional[Tuple[str, ...]] = None   # deepest named folder passed over
         for i, d in enumerate(p.rel_dirs):
             prefix = tuple(p.rel_dirs[:i + 1])
+            if prefix in projects:
+                return prefix
             if is_generic_folder(d):
                 continue
             n = subtree_count[prefix]
@@ -412,10 +460,17 @@ def build_units(profiles: List[FileProfile]) -> List[Unit]:
                 key = re.sub(r"[^a-z]", "", _fold(d))
                 wrapper = direct_count[prefix] == 0 and len(child_dirs[prefix]) == 1
                 if n > cap or wrapper or key in _CONTAINER_FOLDERS:
-                    continue  # container ("Work", "Projects"): its children become the units
+                    # container ("Work", "Projects"): its children become the units
+                    if key not in _CONTAINER_FOLDERS:
+                        skipped = prefix
+                    continue
             if n < 2:
                 return None  # a named folder with one file says little — place the file
             return prefix
+        # Only generic folders below a big named folder ("AI_trading/data"):
+        # stay with that folder instead of being scattered file by file.
+        if skipped is not None and subtree_count[skipped] >= 2:
+            return skipped
         return None
 
     groups: Dict[Tuple[str, ...], List[FileProfile]] = defaultdict(list)
@@ -427,7 +482,8 @@ def build_units(profiles: List[FileProfile]) -> List[Unit]:
         else:
             groups[key].append(p)
     for key, files in groups.items():
-        units.append(Unit(key="dir:" + "/".join(key), files=files, name=key[-1], base_dirs=list(key)))
+        units.append(Unit(key="dir:" + "/".join(key), files=files, name=key[-1], base_dirs=list(key),
+                          project=key in projects))
     return units
 
 
@@ -1030,8 +1086,9 @@ class TreeArchitect:
             if u.name and keep_folders:
                 why = f"Kept your folder '{u.name}' together ({u.size} files) — {rationale}"
                 for f in u.files:
-                    inner = [d for d in f.rel_dirs[len(u.base_dirs):] if not is_generic_folder(d)]
-                    placements.append(Placement(f.id, path + [_clean_name(u.name)] + [_clean_name(d) for d in inner], why))
+                    inner = [d for d in f.rel_dirs[len(u.base_dirs):] if u.project or not is_generic_folder(d)]
+                    inner = inner if u.project else [_clean_name(d) for d in inner]
+                    placements.append(Placement(f.id, path + [_clean_name(u.name)] + inner, why))
             else:
                 for f in u.files:
                     placements.append(Placement(f.id, list(path), rationale))
