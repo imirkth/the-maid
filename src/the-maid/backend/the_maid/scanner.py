@@ -14,6 +14,56 @@ from datetime import datetime
 from .sandbox import validate_path, MAX_FILES
 
 
+# Folders of tool-generated files (libraries, caches, VCS data). Each is listed
+# as ONE entry instead of thousands of files, so it doesn't eat the scan limit,
+# and it moves as a whole with the project that holds it.
+BUNDLE_DIR_NAMES = {
+    "node_modules", "site-packages", "dist-packages", "__pycache__", ".git", ".hg", ".svn",
+    ".tox", ".nox", ".mypy_cache", ".pytest_cache", ".ruff_cache", ".gradle", ".ipynb_checkpoints",
+    "venv", ".venv", "virtualenv",
+}
+
+# Lock / system files that aren't documents: never listed.
+JUNK_FILE_NAMES = {".ds_store", "thumbs.db", "desktop.ini", "ehthumbs.db"}
+
+
+def is_junk_file(name: str) -> bool:
+    low = name.lower()
+    return (low in JUNK_FILE_NAMES or name.startswith("~$")          # Office owner/lock file
+            or name.startswith(".~lock.") or low.startswith("._"))  # LibreOffice lock, macOS resource fork
+
+
+def is_bundle_dir(path: Path) -> bool:
+    """A virtualenv, conda env, dependency or cache folder (whatever it is called)."""
+    if path.name.lower() in BUNDLE_DIR_NAMES:
+        return True
+    try:
+        return (path / "pyvenv.cfg").is_file() or (path / "conda-meta").is_dir()
+    except OSError:
+        return False
+
+
+def _count_files(path: Path) -> tuple:
+    """(file count, total bytes) under a folder, without following links."""
+    count = size = 0
+    stack = [str(path)]
+    while stack:
+        try:
+            with os.scandir(stack.pop()) as it:
+                for e in it:
+                    try:
+                        if e.is_dir(follow_symlinks=False):
+                            stack.append(e.path)
+                        elif e.is_file(follow_symlinks=False):
+                            count += 1
+                            size += e.stat(follow_symlinks=False).st_size
+                    except OSError:
+                        continue
+        except OSError:
+            continue
+    return count, size
+
+
 class FileScanner:
     """Scans directories and extracts file metadata."""
 
@@ -37,8 +87,21 @@ class FileScanner:
                 d for d in dirnames
                 if self._is_safe_dir(Path(dirpath) / d, sandbox_folders)
             ]
+            # Library / cache folders count as one entry and are not walked into
+            bundles = [d for d in dirnames if is_bundle_dir(Path(dirpath) / d)]
+            dirnames[:] = [d for d in dirnames if d not in bundles]
+            for d in bundles:
+                if self.scanned_count >= self.max_files:
+                    break
+                try:
+                    results.append(self._bundle_metadata(Path(dirpath) / d))
+                    self.scanned_count += 1
+                except (PermissionError, OSError) as e:
+                    self.errors.append(f"Error scanning {Path(dirpath) / d}: {e}")
 
             for filename in filenames:
+                if is_junk_file(filename):
+                    continue
                 if self.scanned_count >= self.max_files:
                     self.errors.append(f"Reached max file limit ({self.max_files})")
                     break
@@ -98,6 +161,21 @@ class FileScanner:
             "modified_time": datetime.fromtimestamp(stat.st_mtime).isoformat(),
             "extension": file_path.suffix.lower(),
             "mime_type": self._guess_mime(file_path),
+        }
+
+    def _bundle_metadata(self, dir_path: Path) -> Dict[str, Any]:
+        stat = dir_path.stat()
+        count, size = _count_files(dir_path)
+        return {
+            "file_id": self._generate_id(str(dir_path)),
+            "filename": dir_path.name,
+            "path": str(dir_path),
+            "size_bytes": size,
+            "modified_time": datetime.fromtimestamp(stat.st_mtime).isoformat(),
+            "extension": "",
+            "mime_type": "inode/directory",
+            "is_folder": True,          # moved as a whole
+            "file_count": count,
         }
 
     def _generate_id(self, path_str: str) -> str:

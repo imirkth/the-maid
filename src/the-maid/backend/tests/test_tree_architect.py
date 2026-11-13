@@ -321,7 +321,9 @@ def test_project_keeps_its_inner_structure(code_drive):
     assert len(homes) == 1, f"project split across {homes}"
     scalers = _folder_of(placed, "scaler")
     assert len(scalers) == 1 and next(iter(scalers)).endswith("AI_trading/data")
-    assert all(v.endswith("__pycache__") for k, v in placed.items() if k.endswith(".pyc"))
+    venv = [f for f in files if f.get("is_folder")]
+    assert [f["filename"] for f in venv] == ["venv"] and venv[0]["file_count"] == 320
+    assert placed[os.path.relpath(venv[0]["path"])] == "Code projects/AI_trading"
 
 
 def test_files_under_a_big_named_folder_stay_with_it(tmp_path):
@@ -339,3 +341,23 @@ def test_files_under_a_big_named_folder_stay_with_it(tmp_path):
     units = build_units(profiles)
     data = [u for u in units if any("sample_" in f.filename for f in u.files)]
     assert len(data) == 1 and data[0].name == "Thesis" and data[0].size == 4
+
+
+def test_code_projects_get_their_own_branch(code_drive):
+    files = _scan(code_drive)
+    placed = _placements(TreeArchitect(str(code_drive)).build(files), files)
+    proj = {v for k, v in placed.items() if "AI_trading" in k}
+    assert all(v.startswith("Code projects/AI_trading") for v in proj)
+    assert not any(v.startswith("Code projects") for k, v in placed.items() if "AI_trading" not in k)
+
+
+def test_wallet_files_are_kept_together(messy_drive):
+    _write(messy_drive, "UTC--2017-12-04T10-11-12.123Z--a1b2c3", '{"crypto": {}}')
+    _write(messy_drive, "UTC--2018-01-02T10-11-12.123Z--d4e5f6", '{"crypto": {}}')
+    _write(messy_drive, "Downloads/my little wallet.dat")
+    _write(messy_drive, "curecoinwallet.dat")
+    files = _scan(messy_drive)
+    placed = _placements(TreeArchitect(str(messy_drive)).build(files), files)
+    names = {k: os.path.basename(k) for k in placed}
+    wallets = {v for k, v in placed.items() if names[k].startswith("UTC--") or "wallet" in names[k]}
+    assert wallets == {"Crypto wallets"}

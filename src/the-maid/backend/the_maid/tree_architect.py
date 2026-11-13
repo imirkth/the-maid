@@ -101,8 +101,19 @@ KIND_LABEL = {
     "photo": "Images", "video": "Videos", "audio": "Audio", "installer": "Installers",
     "archive": "Archives", "document": "Documents", "spreadsheet": "Spreadsheets",
     "presentation": "Presentations", "code": "Code", "design": "Design files",
-    "font": "Fonts", "other": "Other files",
+    "font": "Fonts", "wallet": "Crypto wallets", "other": "Other files",
 }
+
+CODE_PROJECTS = "Code projects"
+CRYPTO_WALLETS = "Crypto wallets"
+_WALLET_NAME = re.compile(
+    r"^utc--\d{4}-\d\d-\d\dt"                    # Ethereum keystore (UTC--2017-...)
+    r"|wallet.*\.(dat|json|wallet|key|bak)$"        # wallet.dat, my little wallet.dat, curecoinwallet.dat
+    r"|\.wallet$|^keystore$")
+
+
+def is_wallet_file(filename: str) -> bool:
+    return bool(_WALLET_NAME.search(_fold(filename)))
 
 MEDIA_KINDS = {"photo", "video"}
 
@@ -280,6 +291,7 @@ class FileProfile:
     date_source: str = ""
     gps: Optional[Tuple[float, float]] = None
     is_screenshot: bool = False
+    is_folder: bool = False        # a library/cache folder scanned as one entry
 
 
 @dataclass
@@ -365,6 +377,10 @@ def profile_file(idx: int, f: Dict[str, Any], scan_root: str,
     filename = f.get("filename") or os.path.basename(path)
     ext = (f.get("extension") or os.path.splitext(filename)[1]).lower()
     kind = EXT_KIND.get(ext, "other")
+    if f.get("is_folder"):
+        kind = "code"          # a library / cache folder listed as one entry
+    elif is_wallet_file(filename):
+        kind = "wallet"
     rel = _rel_dirs(path, scan_root)
 
     terms: Counter = Counter()
@@ -376,7 +392,7 @@ def profile_file(idx: int, f: Dict[str, Any], scan_root: str,
     for depth, d in enumerate(reversed(meaningful)):
         for t in tokenize(d):
             terms[t] += max(0.8, 2.0 - 0.4 * depth)
-    if kind not in MEDIA_KINDS and kind not in {"audio", "installer", "archive", "font"}:
+    if not f.get("is_folder") and kind not in MEDIA_KINDS and kind not in {"audio", "installer", "archive", "font", "wallet"}:
         content = ""
         try:
             content = read_content(path) if path else ""
@@ -393,7 +409,8 @@ def profile_file(idx: int, f: Dict[str, Any], scan_root: str,
         gps = (float(exif["gps_lat"]), float(exif["gps_lon"]))
     low = _fold(filename)
     is_shot = kind == "photo" and bool(re.search(r"screen ?shot|capture d.?ecran|screen_?\d|scrnli", low))
-    return FileProfile(idx, path, filename, rel, kind, terms, date, source, gps, is_shot)
+    return FileProfile(idx, path, filename, rel, kind, terms, date, source, gps, is_shot,
+                       bool(f.get("is_folder")))
 
 
 # ---------------------------------------------------------------------------
@@ -409,7 +426,7 @@ def find_project_roots(profiles: List[FileProfile]) -> set:
     candidates = set()
     for p in profiles:
         dirs = p.rel_dirs
-        if dirs and p.filename.lower() in _PROJECT_MARKER_FILES:
+        if dirs and (p.filename.lower() in _PROJECT_MARKER_FILES or p.is_folder):
             candidates.add(tuple(dirs))
         for j, d in enumerate(dirs):
             if d.lower() in _PROJECT_MARKER_DIRS:
@@ -978,9 +995,14 @@ class TreeArchitect:
         units = build_units(free)
 
         media_units, audio_units, software_units, topic_units = [], [], [], []
+        project_units, wallet_units = [], []
         for u in units:
             k = u.kind
-            if u.media_share() >= 0.7:
+            if u.project:
+                project_units.append(u)
+            elif not u.name and k == "wallet":
+                wallet_units.append(u)
+            elif u.media_share() >= 0.7:
                 media_units.append(u)
             elif k == "audio":
                 audio_units.append(u)
@@ -1034,6 +1056,8 @@ class TreeArchitect:
         self._place_media(media_units, placements)
         self._place_audio(audio_units, placements)
         self._place_software(software_units, placements)
+        self._place_units(project_units, [CODE_PROJECTS], "a code project, kept whole", placements)
+        self._place_units(wallet_units, [CRYPTO_WALLETS], "Crypto wallet and key files, kept together", placements)
         self._place_unsorted(no_signal, placements)
 
         tree = self._to_legacy(placements, files)
