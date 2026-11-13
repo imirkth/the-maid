@@ -94,6 +94,10 @@ _KIND_EXT: Dict[str, set] = {
              ".json", ".xml", ".yaml", ".yml", ".toml", ".ipynb"},
     "design": {".psd", ".ai", ".sketch", ".fig", ".xd", ".svg", ".indd", ".blend", ".stl", ".dwg"},
     "font": {".ttf", ".otf", ".woff", ".woff2"},
+    # Installed program files (a copied "Program Files" folder, MATLAB, Photoshop...)
+    "program": {".dll", ".so", ".dylib", ".sys", ".ocx", ".cab", ".msp", ".msm", ".lib", ".pyd",
+                ".jar", ".class", ".8bf", ".aip", ".mexw32", ".mexw64", ".mexa64", ".mexmaci64",
+                ".drv", ".cpl", ".manifest", ".mui", ".tlb", ".olb", ".chm", ".hlp", ".inf"},
 }
 EXT_KIND: Dict[str, str] = {e: k for k, exts in _KIND_EXT.items() for e in exts}
 
@@ -101,7 +105,7 @@ KIND_LABEL = {
     "photo": "Images", "video": "Videos", "audio": "Audio", "installer": "Installers",
     "archive": "Archives", "document": "Documents", "spreadsheet": "Spreadsheets",
     "presentation": "Presentations", "code": "Code", "design": "Design files",
-    "font": "Fonts", "wallet": "Crypto wallets", "other": "Other files",
+    "font": "Fonts", "program": "Programs", "wallet": "Crypto wallets", "other": "Other files",
 }
 
 CODE_PROJECTS = "Code projects"
@@ -116,6 +120,7 @@ def is_wallet_file(filename: str) -> bool:
     return bool(_WALLET_NAME.search(_fold(filename)))
 
 MEDIA_KINDS = {"photo", "video"}
+_SOFTWARE_KINDS = {"installer", "archive", "font", "program"}
 
 # ---------------------------------------------------------------------------
 # Text normalisation
@@ -392,7 +397,7 @@ def profile_file(idx: int, f: Dict[str, Any], scan_root: str,
     for depth, d in enumerate(reversed(meaningful)):
         for t in tokenize(d):
             terms[t] += max(0.8, 2.0 - 0.4 * depth)
-    if not f.get("is_folder") and kind not in MEDIA_KINDS and kind not in {"audio", "installer", "archive", "font", "wallet"}:
+    if not f.get("is_folder") and kind not in MEDIA_KINDS and kind not in {"audio", "wallet"} | _SOFTWARE_KINDS:
         content = ""
         try:
             content = read_content(path) if path else ""
@@ -1006,8 +1011,8 @@ class TreeArchitect:
                 media_units.append(u)
             elif k == "audio":
                 audio_units.append(u)
-            elif k in {"installer", "archive", "font"} and (
-                    not u.name or sum(f.kind in {"installer", "archive", "font"} for f in u.files) >= 0.5 * u.size):
+            elif (not u.name and k in {"installer", "archive", "font", "program"}) or (
+                    u.name and sum(f.kind in _SOFTWARE_KINDS for f in u.files) >= 0.3 * u.size):
                 software_units.append(u)
             else:
                 topic_units.append(u)

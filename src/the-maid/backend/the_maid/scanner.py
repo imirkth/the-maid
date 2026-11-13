@@ -29,7 +29,7 @@ JUNK_FILE_NAMES = {".ds_store", "thumbs.db", "desktop.ini", "ehthumbs.db"}
 
 def is_junk_file(name: str) -> bool:
     low = name.lower()
-    return (low in JUNK_FILE_NAMES or name.startswith("~$")          # Office owner/lock file
+    return (low in JUNK_FILE_NAMES or low.lstrip("_") in JUNK_FILE_NAMES or name.startswith("~$")          # Office owner/lock file
             or name.startswith(".~lock.") or low.startswith("._"))  # LibreOffice lock, macOS resource fork
 
 

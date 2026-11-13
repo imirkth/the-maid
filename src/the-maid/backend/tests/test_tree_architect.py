@@ -367,9 +367,11 @@ def test_named_installer_folder_goes_to_software(tmp_path):
     root = tmp_path / "drive"
     for i in range(6):
         _write(root, f"Data/programme/setup_{i}.exe")
-        _write(root, f"Data/programme/disk_{i}.iso")
+        _write(root, f"Data/programme/matlab/toolbox/libmx_{i}.dll")
+        _write(root, f"Data/programme/matlab/toolbox/plot_{i}.m", "function plot")
+        _write(root, f"Data/programme/matlab/toolbox/readme_{i}.txt", "toolbox help")
         _write(root, f"Cryocare services/invoice_{i}.txt", f"{INVOICE} cryocare {i}")
         _write(root, f"Recipes/recette_{i}.txt", f"{RECIPE} {i}")
     files = _scan(root)
     placed = _placements(TreeArchitect(str(root)).build(files), files)
-    assert _folder_of(placed, "programme") == {"Software & Archives/programme"}
+    assert all(v.startswith("Software & Archives/programme") for v in _folder_of(placed, "programme"))
