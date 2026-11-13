@@ -33,12 +33,36 @@ def is_junk_file(name: str) -> bool:
             or name.startswith(".~lock.") or low.startswith("._"))  # LibreOffice lock, macOS resource fork
 
 
-def is_bundle_dir(path: Path) -> bool:
-    """A virtualenv, conda env, dependency or cache folder (whatever it is called)."""
+PROJECT_MARKER_FILES = {
+    "requirements.txt", "setup.py", "setup.cfg", "pyproject.toml", "pipfile", "environment.yml",
+    "package.json", "cargo.toml", "go.mod", "pom.xml", "build.gradle", "cmakelists.txt", "manage.py",
+}
+
+
+def _is_old_virtualenv(path: Path) -> bool:
+    """virtualenv < 20 has no pyvenv.cfg: lib/pythonX.Y/orig-prefix.txt or site-packages."""
+    lib = path / "lib"
+    if not (path / "bin" / "activate").is_file() and not (path / "Scripts" / "activate").is_file() \
+            and not lib.is_dir():
+        return False
+    try:
+        for py in lib.glob("python*"):
+            if (py / "orig-prefix.txt").is_file() or (py / "site-packages").is_dir():
+                return True
+    except OSError:
+        pass
+    return (path / "Lib" / "site-packages").is_dir()      # Windows venv
+
+
+def is_bundle_dir(path: Path, inside_project: bool = False) -> bool:
+    """A virtualenv, conda env, dependency or cache folder (whatever it is called),
+    or a third-party repository checked out inside a project."""
     if path.name.lower() in BUNDLE_DIR_NAMES:
         return True
     try:
-        return (path / "pyvenv.cfg").is_file() or (path / "conda-meta").is_dir()
+        if (path / "pyvenv.cfg").is_file() or (path / "conda-meta").is_dir() or _is_old_virtualenv(path):
+            return True
+        return inside_project and (path / ".git").exists()
     except OSError:
         return False
 
@@ -88,7 +112,10 @@ class FileScanner:
                 if self._is_safe_dir(Path(dirpath) / d, sandbox_folders)
             ]
             # Library / cache folders count as one entry and are not walked into
-            bundles = [d for d in dirnames if is_bundle_dir(Path(dirpath) / d)]
+            inside_project = (any(f.lower() in PROJECT_MARKER_FILES for f in filenames)
+                              or any(d.lower() in BUNDLE_DIR_NAMES for d in dirnames)
+                              or any((Path(dirpath) / d / "pyvenv.cfg").is_file() for d in dirnames))
+            bundles = [d for d in dirnames if is_bundle_dir(Path(dirpath) / d, inside_project)]
             dirnames[:] = [d for d in dirnames if d not in bundles]
             for d in bundles:
                 if self.scanned_count >= self.max_files:

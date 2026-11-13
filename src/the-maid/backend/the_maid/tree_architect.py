@@ -1006,7 +1006,8 @@ class TreeArchitect:
                 media_units.append(u)
             elif k == "audio":
                 audio_units.append(u)
-            elif not u.name and k in {"installer", "archive", "font"}:
+            elif k in {"installer", "archive", "font"} and (
+                    not u.name or sum(f.kind in {"installer", "archive", "font"} for f in u.files) >= 0.5 * u.size):
                 software_units.append(u)
             else:
                 topic_units.append(u)
@@ -1203,6 +1204,9 @@ class TreeArchitect:
                     placements.append(Placement(f.id, ["Music", "Singles"], "Loose audio file"))
 
     def _place_software(self, units: List[Unit], placements: List[Placement]) -> None:
+        named = [u for u in units if u.name]   # a folder of installers ("programme") stays whole
+        self._place_units(named, ["Software & Archives"], "mostly installers and archives", placements)
+        units = [u for u in units if not u.name]
         flat = sum(u.size for u in units) < SMALL_BRANCH_FILES
         for u in units:
             for f in u.files:

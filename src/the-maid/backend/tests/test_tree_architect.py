@@ -361,3 +361,15 @@ def test_wallet_files_are_kept_together(messy_drive):
     names = {k: os.path.basename(k) for k in placed}
     wallets = {v for k, v in placed.items() if names[k].startswith("UTC--") or "wallet" in names[k]}
     assert wallets == {"Crypto wallets"}
+
+
+def test_named_installer_folder_goes_to_software(tmp_path):
+    root = tmp_path / "drive"
+    for i in range(6):
+        _write(root, f"Data/programme/setup_{i}.exe")
+        _write(root, f"Data/programme/disk_{i}.iso")
+        _write(root, f"Cryocare services/invoice_{i}.txt", f"{INVOICE} cryocare {i}")
+        _write(root, f"Recipes/recette_{i}.txt", f"{RECIPE} {i}")
+    files = _scan(root)
+    placed = _placements(TreeArchitect(str(root)).build(files), files)
+    assert _folder_of(placed, "programme") == {"Software & Archives/programme"}
