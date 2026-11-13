@@ -51,6 +51,15 @@ def _sandbox_folders() -> Optional[List[str]]:
     return load_sandbox_folders()
 
 
+def face_clustering_enabled() -> bool:
+    """The "Face clustering" switch in Settings (off unless turned on)."""
+    try:
+        with open(SETTINGS_PATH, "r") as f:
+            return bool(json.load(f).get("features", {}).get("face_clustering", False))
+    except (OSError, json.JSONDecodeError, AttributeError):
+        return False
+
+
 # --- Models ---
 
 class ScanRequest(BaseModel):
@@ -168,7 +177,7 @@ async def scan_directory(request: ScanRequest):
     return {"files": files, "errors": scanner.errors, "count": scanner.scanned_count}
 
 @app.post("/categorize")
-async def categorize_files(request: CategorizeRequest):
+def categorize_files(request: CategorizeRequest):
     """Design a new folder tree for the scanned files (see tree_architect).
 
     Returns the category tree for the frontend to render, plus a ``summary``
@@ -186,9 +195,10 @@ async def categorize_files(request: CategorizeRequest):
     # EXIF extraction adds camera, GPS, date, dimensions for image files.
     # All three degrade gracefully — no crash if insightface/PIL unavailable.
     files = request.files
-    detector = FaceDetector()
-    detect_faces_for_scan(files, detector)
-    cluster_faces_from_scan(files)
+    if face_clustering_enabled():
+        detector = FaceDetector()
+        detect_faces_for_scan(files, detector)
+        cluster_faces_from_scan(files)
     for f in files:
         f["exif"] = extract_exif(f.get("path", ""))
 
@@ -331,7 +341,7 @@ async def write_metadata(file_path: str, tags: List[str]):
     return {"file": file_path, "tags_written": len(tags)}
 
 @app.post("/faces/detect")
-async def detect_faces(directory: str):
+def detect_faces(directory: str):
     """Detect faces in all images in a directory (Slice 6A)."""
     validate_path(directory, _sandbox_folders())
     scanner = FileScanner()
@@ -349,7 +359,7 @@ async def detect_faces(directory: str):
     }
 
 @app.post("/faces/cluster")
-async def cluster_faces(directory: str):
+def cluster_faces(directory: str):
     """Detect + cluster faces in a directory (Slice 6A + 6B combined)."""
     validate_path(directory, _sandbox_folders())
     scanner = FileScanner()
@@ -694,7 +704,7 @@ async def put_preferences(data: dict):
 
 
 @app.post("/tree/choices")
-async def tree_choices(request: CategorizeRequest):
+def tree_choices(request: CategorizeRequest):
     """Preference check: questions whose options are previewed on the user's own files."""
     if request.directory:
         try:
@@ -783,7 +793,7 @@ class RouteRequest(BaseModel):
 
 
 @app.post("/tree/route")
-async def route_files(request: RouteRequest):
+def route_files(request: RouteRequest):
     """Suggest where new files belong in the approved tree ("keep it live")."""
     router = TreeRouter(load_model())
     return {"suggestions": [
