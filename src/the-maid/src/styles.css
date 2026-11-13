@@ -906,6 +906,20 @@ button.small {
   opacity: 0.7;
 }
 
+.content-tree-why {
+  color: var(--text-secondary);
+  font-size: 0.8rem;
+  font-style: italic;
+  margin: 2px 0 6px;
+}
+
+.tree-design-summary {
+  color: var(--text-secondary);
+  font-size: 0.85rem;
+  margin: 4px 0 8px;
+  flex-basis: 100%;
+}
+
 .content-tree-file-proposed {
   color: #4ade80;
   font-size: 0.78rem;
