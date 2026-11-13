@@ -326,6 +326,22 @@ def test_project_keeps_its_inner_structure(code_drive):
     assert placed[os.path.relpath(venv[0]["path"])] == "Code projects/AI_trading"
 
 
+def test_project_beside_other_folders_is_not_swallowed_by_its_parent(code_drive):
+    """A small parent ("PycharmProjects") holding a project and sibling folders must not
+    become the unit: the project below it stays its own unit (venv scanned as one entry)."""
+    for name in ("RL_CG_LOG", "NN_gene", "kaggle_2_sigma"):
+        for i in range(3):
+            _write(code_drive, f"PycharmProjects/{name}/run_{i}.log", f"epoch {i} loss")
+    files = _scan(code_drive)
+    profiles = [profile_file(i, f, str(code_drive)) for i, f in enumerate(files)]
+    units = build_units(profiles)
+    holders = {u.name for u in units if any("AI_trading" in f.path for f in u.files)}
+    assert holders == {"AI_trading"}, holders
+    assert [u for u in units if u.name == "AI_trading"][0].project
+    placed = _placements(TreeArchitect(str(code_drive)).build(files), files)
+    assert all(v.startswith("Code projects/AI_trading") for k, v in placed.items() if "AI_trading" in k)
+
+
 def test_files_under_a_big_named_folder_stay_with_it(tmp_path):
     """Generic sub-folders of a too-big folder fall back to that folder, not to loose files."""
     root = tmp_path / "drive"

@@ -455,6 +455,9 @@ def build_units(profiles: List[FileProfile]) -> List[Unit]:
     inside a project folder stays in that project.
     """
     projects = find_project_roots(profiles)
+    # Folders above a project ("PycharmProjects") are never the unit themselves,
+    # whatever their size, or the project would be swallowed by its parent.
+    above_projects = {r[:i] for r in projects for i in range(1, len(r))}
     total = len(profiles)
     cap = max(UNIT_MAX_FILES_FLOOR, int(total * UNIT_MAX_SHARE))
 
@@ -474,7 +477,7 @@ def build_units(profiles: List[FileProfile]) -> List[Unit]:
             prefix = tuple(p.rel_dirs[:i + 1])
             if prefix in projects:
                 return prefix
-            if is_generic_folder(d):
+            if prefix in above_projects or is_generic_folder(d):
                 continue
             n = subtree_count[prefix]
             has_named_children = any(not is_generic_folder(c) for c in child_dirs.get(prefix, ()))
