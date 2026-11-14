@@ -64,11 +64,12 @@ def face_clustering_enabled() -> bool:
 
 class ScanRequest(BaseModel):
     directory: str = Field(..., description="Absolute path to scan")
-    max_files: int = Field(default=100000, ge=1, le=100000)
+    max_files: int = Field(default=100000, ge=1, le=500000)
 
 class CategorizeRequest(BaseModel):
     files: List[dict] = Field(default_factory=list)
     directory: str = Field(default="", description="Scan root directory for relative path computation")
+    append: bool = Field(default=False, description="Add to the saved tree (next batch) instead of replacing it")
 
 class FileProposal(BaseModel):
     file_id: str
@@ -269,15 +270,18 @@ def categorize_files(request: CategorizeRequest):
 
     summary = result.get("summary", {})
 
-    # Merge into persistent tree and save
-    existing = _load_tree()
-    _save_tree({
-        "tree": categories_list,
-        "approved_structure": existing.get("approved_structure", False),
-        "total_files": total,
-        "total_categorized": categorized_count,
-        "summary": summary,
-    })
+    if request.append:
+        # Next batch of a folder-by-folder build: add to the tree built so far
+        _merge_into_saved_tree(categories_list, total, categorized_count)
+    else:
+        existing = _load_tree()
+        _save_tree({
+            "tree": categories_list,
+            "approved_structure": existing.get("approved_structure", False),
+            "total_files": total,
+            "total_categorized": categorized_count,
+            "summary": summary,
+        })
 
     return {
         "categories": categories_list,
@@ -429,6 +433,10 @@ async def save_tree(state: TreeState):
 async def merge_tree(request: MergeRequest):
     """Merge new categorization results into the existing persistent tree.
     New files go into their categories; existing files keep their assigned categories."""
+    return _merge_into_saved_tree(request.categories, request.total_files, request.total_categorized)
+
+
+def _merge_into_saved_tree(categories: List[dict], total_files: int, total_categorized: int) -> dict:
     existing = _load_tree()
     existing_tree = existing.get("tree", [])
     # Build index of existing files by file_id
@@ -446,7 +454,7 @@ async def merge_tree(request: MergeRequest):
                 seen[child["file_id"]] = (cat_name, "")
 
     # Merge new categories into existing tree
-    for new_cat in request.categories:
+    for new_cat in categories:
         new_name = new_cat.get("name", "Uncategorized")
         # Find or create the category in existing tree
         existing_cat = None
@@ -483,8 +491,8 @@ async def merge_tree(request: MergeRequest):
                     seen[fid] = (new_name, "")
 
     # Update counts
-    total = request.total_files + existing.get("total_files", 0)
-    cat_count = request.total_categorized + existing.get("total_categorized", 0)
+    total = total_files + existing.get("total_files", 0)
+    cat_count = total_categorized + existing.get("total_categorized", 0)
     summary = existing.get("summary", {})
     _save_tree({
         "tree": existing_tree,
@@ -703,6 +711,18 @@ async def put_preferences(data: dict):
     return prefs.to_dict()
 
 
+CHOICES_SAMPLE = 6000  # the preference previews only need a representative slice
+
+
+def _sample_evenly(files: List[dict], n: int) -> List[dict]:
+    """Every k-th file in path order, so each folder is represented."""
+    if len(files) <= n:
+        return files
+    ordered = sorted(files, key=lambda f: f.get("path", ""))
+    step = len(ordered) / n
+    return [ordered[int(i * step)] for i in range(n)]
+
+
 @app.post("/tree/choices")
 def tree_choices(request: CategorizeRequest):
     """Preference check: questions whose options are previewed on the user's own files."""
@@ -711,7 +731,7 @@ def tree_choices(request: CategorizeRequest):
             validate_path(request.directory, _sandbox_folders())
         except ValueError as e:
             raise HTTPException(status_code=400, detail=str(e))
-    files = request.files
+    files = _sample_evenly(request.files, CHOICES_SAMPLE)
     for f in files:
         if "exif" not in f:
             f["exif"] = extract_exif(f.get("path", ""))

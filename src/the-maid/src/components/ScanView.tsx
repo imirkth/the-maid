@@ -1,4 +1,4 @@
-import { useState, useEffect, type ReactNode } from "react";
+import { useState, useEffect, useRef, type ReactNode } from "react";
 import { invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
 import PreferenceCheck from "./PreferenceCheck";
@@ -6,6 +6,10 @@ import TreeExplorer from "./TreeExplorer";
 import Icon from "./Icon";
 import { allFiles, buildFolderTree, findNode, fullPath, plural, type TreeCategory } from "../lib/tree";
 import { recordFeedback, type TreeFeedback } from "../lib/feedback";
+import { splitIntoBatches } from "../lib/batches";
+
+// Whole drive: the scan reads everything, the tree is then built in batches
+const SCAN_LIMIT = 250000;
 
 interface FileMeta {
   file_id: string;
@@ -146,6 +150,8 @@ export default function ScanView() {
 
   // Categorization state
   const [categorizing, setCategorizing] = useState(false);
+  // A folder-by-folder build in progress (total 0 = single build)
+  const runRef = useRef({ total: 0, doneBefore: 0, batch: 0, batches: 0 });
   const [categorizeProgress, setCategorizeProgress] = useState(0);
   const [catFilesDone, setCatFilesDone] = useState(0);
   const [catFilesTotal, setCatFilesTotal] = useState(0);
@@ -203,16 +209,28 @@ export default function ScanView() {
 
     const unlistenCatProgress = listen<CategorizeProgress>("categorize_progress", (e) => {
       const p = e.payload;
-      setCategorizeProgress(p.progress * 100);
-      setCatFilesDone(p.files_done ?? 0);
-      setCatFilesTotal(p.files_total ?? 0);
-      setCatBatch(p.batch ?? 0);
-      setCatTotalBatches(p.total_batches ?? 0);
-      setCatElapsed(p.elapsed_seconds ?? 0);
-      setCatEta(p.eta_seconds ?? 0);
+      const run = runRef.current;
+      if (run.total > 0) {
+        // folder-by-folder build: progress over the whole drive
+        const done = run.doneBefore + (p.files_done ?? 0);
+        setCategorizeProgress(Math.min(100, (done / run.total) * 100));
+        setCatFilesDone(done);
+        setCatFilesTotal(run.total);
+        setCatBatch(run.batch);
+        setCatTotalBatches(run.batches);
+      } else {
+        setCategorizeProgress(p.progress * 100);
+        setCatFilesDone(p.files_done ?? 0);
+        setCatFilesTotal(p.files_total ?? 0);
+        setCatBatch(p.batch ?? 0);
+        setCatTotalBatches(p.total_batches ?? 0);
+        setCatElapsed(p.elapsed_seconds ?? 0);
+        setCatEta(p.eta_seconds ?? 0);
+      }
     });
 
     const unlistenCatComplete = listen<{ total: number; elapsed_seconds: number }>("categorize_complete", (e) => {
+      if (runRef.current.total > 0) return; // more batches may follow; buildTree ends the run
       setCategorizing(false);
       setCategorizeProgress(100);
       setCatEta(0);
@@ -231,27 +249,47 @@ export default function ScanView() {
   const results = batches.flatMap((b) => b.files);
   const folders = settings?.sandbox_folders ?? [];
 
-  // Build the tree folder by folder, so each folder is tidied in place
+  // Build the tree folder by folder: each chosen folder, and inside a big one
+  // its sub-folders, is a batch; every batch adds to the same tree.
   const buildTree = async (todo: Batch[]) => {
-    const work = todo.filter((b) => b.files.length > 0);
+    const work = todo
+      .filter((b) => b.files.length > 0)
+      .flatMap((b) => splitIntoBatches(b.files, b.directory).map((part) => ({
+        directory: b.directory,
+        files: part.files,
+        label: part.label ? `${folderName(b.directory)} › ${part.label}` : folderName(b.directory),
+      })));
     if (work.length === 0) return;
     const total = work.reduce((n, b) => n + b.files.length, 0);
+    runRef.current = { total: work.length > 1 ? total : 0, doneBefore: 0, batch: 0, batches: work.length };
     setCategorizing(true); setCategorizeProgress(0); setCatFilesDone(0);
-    setCatFilesTotal(total); setCatBatch(0); setCatTotalBatches(0);
+    setCatFilesTotal(total); setCatBatch(0); setCatTotalBatches(work.length);
     setCatElapsed(0); setCatEta(0); setError("");
+    const started = Date.now();
     try {
-      let merged: TreeState | null = null;
       for (const [i, b] of work.entries()) {
-        setPhaseLabel(work.length > 1 ? `${folderName(b.directory)} (${i + 1} of ${work.length})` : folderName(b.directory));
-        const resp: CategorizeResponse = await invoke("categorize_files", { files: b.files, directory: b.directory });
-        merged = await invoke<TreeState>("merge_tree", {
-          categories: resp.categories, totalFiles: resp.total_files, totalCategorized: resp.total_categorized,
-        });
+        runRef.current = { ...runRef.current, batch: i + 1 };
+        setPhaseLabel(work.length > 1 ? `${b.label} (${i + 1} of ${work.length})` : b.label);
+        // the first batch starts a fresh tree, the others add to it
+        await invoke<CategorizeResponse>("categorize_files", { files: b.files, directory: b.directory, append: i > 0 });
+        runRef.current = { ...runRef.current, doneBefore: runRef.current.doneBefore + b.files.length };
+        if (work.length > 1) {
+          const done = runRef.current.doneBefore;
+          const secs = (Date.now() - started) / 1000;
+          setCategorizeProgress((done / total) * 100);
+          setCatFilesDone(done);
+          setCatElapsed(secs);
+          setCatEta(done < total ? (secs / done) * (total - done) : 0);
+        }
       }
-      if (merged) { setTree(merged); setTreeKey((k) => k + 1); }
+      const saved = await invoke<TreeState>("get_tree");
+      setTree(saved); setTreeKey((k) => k + 1);
       setBatches([]);
     } catch (err) { setError(String(err)); }
-    finally { setCategorizing(false); setPhaseLabel(""); }
+    finally {
+      runRef.current = { total: 0, doneBefore: 0, batch: 0, batches: 0 };
+      setCategorizing(false); setPhaseLabel("");
+    }
   };
 
   // The one button: look through the chosen folders, then build the tree straight away
@@ -266,7 +304,7 @@ export default function ScanView() {
         setPhaseLabel(targets.length > 1 ? `${folderName(dir)} (${i + 1} of ${targets.length})` : folderName(dir));
         setProgress(0); setScanCount(0); setScanElapsed(0); setScanEta(0);
         try {
-          const resp: ScanResponse = await invoke("scan_directory", { request: { directory: dir, max_files: 10000 } });
+          const resp: ScanResponse = await invoke("scan_directory", { request: { directory: dir, max_files: SCAN_LIMIT } });
           found.push({ directory: dir, files: resp.files });
           errors.push(...resp.errors);
         } catch (err) { errors.push(`${folderName(dir)}: ${String(err)}`); }

@@ -171,3 +171,37 @@ def test_moves_reuse_an_emptied_subfolder_instead_of_duplicating_it(tmp_path, mo
                                             "target_subcategory": "Sub"}).json()
     subs = [c for c in r["tree"][0]["children"] if c.get("name") == "Sub"]
     assert len(subs) == 1 and [f["file_id"] for f in subs[0]["files"]] == ["f1", "f2"]
+
+
+def test_folder_by_folder_batches_build_one_tree(messy_drive, tmp_path, monkeypatch):
+    from fastapi.testclient import TestClient
+    from the_maid import api, feedback, models, preferences, tree_architect
+
+    state = tmp_path / "state"
+    monkeypatch.setattr(api, "load_feedback", lambda: feedback.load_feedback(str(state / "fb.json")))
+    monkeypatch.setattr(api, "load_preferences", lambda: preferences.Preferences())
+    monkeypatch.setattr(api, "TREE_PATH", str(state / "tree.json"))
+    monkeypatch.setattr(models, "save_model", lambda m: tree_architect.save_model(m, str(state / "m.json")))
+    monkeypatch.setattr(api, "_sandbox_folders", lambda: [str(tmp_path)])
+    monkeypatch.setattr(models.LLMManager, "load_model", lambda self: False)
+    monkeypatch.setattr(models.CategoryRegistry, "save", lambda self: None)
+    client = TestClient(api.app)
+    files = _scan(messy_drive)
+    downloads = [f for f in files if "/Downloads/" in f["path"]]
+    rest = [f for f in files if "/Downloads/" not in f["path"]]
+
+    client.post("/categorize", json={"files": files[:3], "directory": str(messy_drive)})  # an old tree
+    client.post("/categorize", json={"files": downloads, "directory": str(messy_drive)})
+    client.post("/categorize", json={"files": rest, "directory": str(messy_drive), "append": True})
+    tree = client.get("/tree").json()
+    ids = [f["file_id"] for _, _, f in api._tree_file_entries(tree["tree"])]
+    assert sorted(ids) == sorted(f["file_id"] for f in files), "every file once, old tree replaced"
+    assert tree["total_files"] == len(files)
+
+
+def test_choices_use_a_sample_of_a_huge_scan():
+    from the_maid.api import _sample_evenly
+    files = [{"path": f"/d/{c}/{i}"} for c in "abcd" for i in range(5000)]
+    sample = _sample_evenly(files, 400)
+    assert len(sample) == 400
+    assert {f["path"].split("/")[2] for f in sample} == set("abcd")
