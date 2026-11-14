@@ -14,6 +14,80 @@ from datetime import datetime
 from .sandbox import validate_path, MAX_FILES
 
 
+# Folders of tool-generated files (libraries, caches, VCS data). Each is listed
+# as ONE entry instead of thousands of files, so it doesn't eat the scan limit,
+# and it moves as a whole with the project that holds it.
+BUNDLE_DIR_NAMES = {
+    "node_modules", "site-packages", "dist-packages", "__pycache__", ".git", ".hg", ".svn",
+    ".tox", ".nox", ".mypy_cache", ".pytest_cache", ".ruff_cache", ".gradle", ".ipynb_checkpoints",
+    "venv", ".venv", "virtualenv",
+}
+
+# Lock / system files that aren't documents: never listed.
+JUNK_FILE_NAMES = {".ds_store", "thumbs.db", "desktop.ini", "ehthumbs.db"}
+
+
+def is_junk_file(name: str) -> bool:
+    low = name.lower()
+    return (low in JUNK_FILE_NAMES or low.lstrip("_") in JUNK_FILE_NAMES or name.startswith("~$")          # Office owner/lock file
+            or name.startswith(".~lock.") or low.startswith("._"))  # LibreOffice lock, macOS resource fork
+
+
+PROJECT_MARKER_FILES = {
+    "requirements.txt", "setup.py", "setup.cfg", "pyproject.toml", "pipfile", "environment.yml",
+    "package.json", "cargo.toml", "go.mod", "pom.xml", "build.gradle", "cmakelists.txt", "manage.py",
+}
+
+
+def _is_old_virtualenv(path: Path) -> bool:
+    """virtualenv < 20 has no pyvenv.cfg: lib/pythonX.Y/orig-prefix.txt or site-packages."""
+    lib = path / "lib"
+    if not (path / "bin" / "activate").is_file() and not (path / "Scripts" / "activate").is_file() \
+            and not lib.is_dir():
+        return False
+    try:
+        for py in lib.glob("python*"):
+            if (py / "orig-prefix.txt").is_file() or (py / "site-packages").is_dir():
+                return True
+    except OSError:
+        pass
+    return (path / "Lib" / "site-packages").is_dir()      # Windows venv
+
+
+def is_bundle_dir(path: Path, inside_project: bool = False) -> bool:
+    """A virtualenv, conda env, dependency or cache folder (whatever it is called),
+    or a third-party repository checked out inside a project."""
+    if path.name.lower() in BUNDLE_DIR_NAMES:
+        return True
+    try:
+        if (path / "pyvenv.cfg").is_file() or (path / "conda-meta").is_dir() or _is_old_virtualenv(path):
+            return True
+        return inside_project and (path / ".git").exists()
+    except OSError:
+        return False
+
+
+def _count_files(path: Path) -> tuple:
+    """(file count, total bytes) under a folder, without following links."""
+    count = size = 0
+    stack = [str(path)]
+    while stack:
+        try:
+            with os.scandir(stack.pop()) as it:
+                for e in it:
+                    try:
+                        if e.is_dir(follow_symlinks=False):
+                            stack.append(e.path)
+                        elif e.is_file(follow_symlinks=False):
+                            count += 1
+                            size += e.stat(follow_symlinks=False).st_size
+                    except OSError:
+                        continue
+        except OSError:
+            continue
+    return count, size
+
+
 class FileScanner:
     """Scans directories and extracts file metadata."""
 
@@ -37,8 +111,24 @@ class FileScanner:
                 d for d in dirnames
                 if self._is_safe_dir(Path(dirpath) / d, sandbox_folders)
             ]
+            # Library / cache folders count as one entry and are not walked into
+            inside_project = (any(f.lower() in PROJECT_MARKER_FILES for f in filenames)
+                              or any(d.lower() in BUNDLE_DIR_NAMES for d in dirnames)
+                              or any((Path(dirpath) / d / "pyvenv.cfg").is_file() for d in dirnames))
+            bundles = [d for d in dirnames if is_bundle_dir(Path(dirpath) / d, inside_project)]
+            dirnames[:] = [d for d in dirnames if d not in bundles]
+            for d in bundles:
+                if self.scanned_count >= self.max_files:
+                    break
+                try:
+                    results.append(self._bundle_metadata(Path(dirpath) / d))
+                    self.scanned_count += 1
+                except (PermissionError, OSError) as e:
+                    self.errors.append(f"Error scanning {Path(dirpath) / d}: {e}")
 
             for filename in filenames:
+                if is_junk_file(filename):
+                    continue
                 if self.scanned_count >= self.max_files:
                     self.errors.append(f"Reached max file limit ({self.max_files})")
                     break
@@ -98,6 +188,21 @@ class FileScanner:
             "modified_time": datetime.fromtimestamp(stat.st_mtime).isoformat(),
             "extension": file_path.suffix.lower(),
             "mime_type": self._guess_mime(file_path),
+        }
+
+    def _bundle_metadata(self, dir_path: Path) -> Dict[str, Any]:
+        stat = dir_path.stat()
+        count, size = _count_files(dir_path)
+        return {
+            "file_id": self._generate_id(str(dir_path)),
+            "filename": dir_path.name,
+            "path": str(dir_path),
+            "size_bytes": size,
+            "modified_time": datetime.fromtimestamp(stat.st_mtime).isoformat(),
+            "extension": "",
+            "mime_type": "inode/directory",
+            "is_folder": True,          # moved as a whole
+            "file_count": count,
         }
 
     def _generate_id(self, path_str: str) -> str:

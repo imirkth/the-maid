@@ -4,6 +4,7 @@ RetinaFace detection + ArcFace 128D embeddings via insightface.
 Graceful degradation when insightface/models not available.
 """
 
+import os
 from pathlib import Path
 from typing import List, Dict, Any, Optional
 
@@ -61,7 +62,7 @@ class FaceDetector:
         try:
             self._model = self._FaceAnalysis(
                 name="buffalo_l",
-                root=self._model_path or "",
+                root=self._model_path or os.path.expanduser("~/.insightface"),
                 providers=["CPUExecutionProvider"] if self._ctx_id < 0 else None,
             )
             self._model.prepare(ctx_id=self._ctx_id)

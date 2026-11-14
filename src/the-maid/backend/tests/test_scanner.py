@@ -220,3 +220,38 @@ def test_scan_mime_types(temp_scan_dir):
     assert by_name["doc.pdf"]["mime_type"] == "application/pdf"
     assert by_name["sheet.xlsx"]["mime_type"].startswith("application")
     assert by_name["unknown.xyz"]["mime_type"] == "application/octet-stream"
+
+def test_library_folders_are_one_entry_and_lock_files_skipped(tmp_path):
+    from the_maid.scanner import FileScanner
+    proj = tmp_path / "proj"
+    (proj / "venv3" / "lib").mkdir(parents=True)
+    (proj / "venv3" / "pyvenv.cfg").write_text("home = /usr/bin")
+    for i in range(50):
+        (proj / "venv3" / "lib" / f"m{i}.py").write_text("x")
+    (proj / "node_modules" / "left-pad").mkdir(parents=True)
+    (proj / "node_modules" / "left-pad" / "index.js").write_text("x")
+    (proj / "main.py").write_text("print(1)")
+    (proj / "~$budget.xlsx").write_text("lock")
+    (proj / ".DS_Store").write_text("")
+    files = FileScanner(max_files=10).scan_directory(str(tmp_path))
+    by_name = {f["filename"]: f for f in files}
+    assert set(by_name) == {"venv3", "node_modules", "main.py"}
+    assert by_name["venv3"]["is_folder"] and by_name["venv3"]["file_count"] == 51
+    assert by_name["node_modules"]["file_count"] == 1
+
+
+def test_old_virtualenv_and_vendored_repo_are_one_entry(tmp_path):
+    from the_maid.scanner import FileScanner
+    proj = tmp_path / "AI_trading"
+    (proj / "venv3" / "lib" / "python3.5").mkdir(parents=True)
+    (proj / "venv3" / "lib" / "python3.5" / "orig-prefix.txt").write_text("/usr")
+    (proj / "venv3" / "lib" / "python3.5" / "os.py").write_text("x")
+    (proj / "tensorflow" / ".git").mkdir(parents=True)
+    (proj / "tensorflow" / "configure.py").write_text("x")
+    (proj / "tensorflow" / "BUILD").write_text("x")
+    (proj / "requirements.txt").write_text("tensorflow")
+    (tmp_path / "MyRepo" / ".git").mkdir(parents=True)     # the user's own repo: still walked
+    (tmp_path / "MyRepo" / "notes.md").write_text("x")
+    files = FileScanner(max_files=100).scan_directory(str(tmp_path))
+    names = sorted(f["filename"] for f in files)
+    assert names == [".git", "notes.md", "requirements.txt", "tensorflow", "venv3"]

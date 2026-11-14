@@ -1,5 +1,6 @@
 import { useState, useEffect, useCallback } from "react";
 import { invoke } from "@tauri-apps/api/core";
+import Icon from "./Icon";
 import { convertFileSrc } from "@tauri-apps/api/core";
 import type { FaceClusterInfo, RenameResult } from "../types/face-cluster";
 
@@ -68,7 +69,7 @@ export default function FaceClusterView() {
 
   return (
     <div className="face-cluster-view">
-      <h2>👤 Face Clusters</h2>
+      <h2>Faces</h2>
       <p>Group photos by person. Name a cluster to tag all photos.</p>
 
       <div style={{ display: "flex", gap: "8px", marginBottom: "16px" }}>
@@ -117,10 +118,10 @@ export default function FaceClusterView() {
                     }}
                     style={{ flex: 1, padding: "4px 8px" }}
                   />
-                  <button onClick={() => submitRename(cluster.cluster_id)} disabled={!editValue.trim()}>
-                    ✓
+                  <button onClick={() => submitRename(cluster.cluster_id)} disabled={!editValue.trim()} aria-label="Save name">
+                    <Icon name="check" size={16} />
                   </button>
-                  <button onClick={cancelEditing}>✕</button>
+                  <button onClick={cancelEditing} aria-label="Cancel"><Icon name="x" size={16} /></button>
                 </div>
               ) : (
                 <button onClick={() => startEditing(cluster)}

@@ -18,6 +18,9 @@ use sidecar::{SidecarManager, SidecarEvent, LlmServerManager};
 /// Shared sidecar manager — accessible from commands.
 pub struct AppState {
     pub sidecar: Arc<SidecarManager>,
+    /// Bundled llama-server. Held here so it lives as long as the app:
+    /// LlmServerManager kills the server when dropped.
+    pub llm_server: std::sync::Mutex<Option<LlmServerManager>>,
 }
 
 fn resolve_backend_path(app: &tauri::AppHandle) -> PathBuf {
@@ -254,7 +257,10 @@ fn main() {
                 }
             });
 
-            app.manage(AppState { sidecar: manager });
+            app.manage(AppState {
+                sidecar: manager,
+                llm_server: std::sync::Mutex::new(llm_server),
+            });
             Ok(())
         })
         .invoke_handler(tauri::generate_handler![
@@ -287,6 +293,11 @@ fn main() {
             commands::get_model_status,
             commands::download_model,
             commands::categorize_files,
+            commands::get_preferences,
+            commands::save_preferences,
+            commands::get_tree_choices,
+            commands::record_tree_feedback,
+            commands::get_tree_feedback,
             commands::get_tree,
             commands::save_tree,
             commands::merge_tree,
@@ -306,6 +317,11 @@ fn main() {
             if let tauri::RunEvent::Exit = event {
                 if let Some(state) = app_handle.try_state::<AppState>() {
                     let _ = state.sidecar.kill();
+                    if let Ok(mut llm) = state.llm_server.lock() {
+                        if let Some(llm) = llm.as_mut() {
+                            llm.kill();
+                        }
+                    }
                 }
             }
         });

@@ -308,6 +308,18 @@ impl Drop for SidecarManager {
     }
 }
 
+/// `preferred` if nothing listens on it, otherwise a free port picked by the OS.
+/// 8080 is a common default (lnd, dev servers...), so it is often taken.
+fn free_local_port(preferred: u16) -> u16 {
+    if std::net::TcpListener::bind(("127.0.0.1", preferred)).is_ok() {
+        return preferred;
+    }
+    std::net::TcpListener::bind(("127.0.0.1", 0))
+        .and_then(|l| l.local_addr())
+        .map(|a| a.port())
+        .unwrap_or(preferred)
+}
+
 /// Manages the bundled llama-server process for local LLM inference.
 /// No external Ollama needed — the model is bundled inside the AppImage.
 pub struct LlmServerManager {
@@ -339,7 +351,7 @@ impl LlmServerManager {
             mmproj_path: if mmproj_exists { Some(mmproj_path) } else { None },
             server_path,
             lib_dir: llama_dir,
-            port: 8080,
+            port: free_local_port(8080),
         })
     }
 
@@ -397,6 +409,20 @@ impl LlmServerManager {
             let _ = child.wait();
             log::info!("[The Maid] LLM server terminated");
         }
+    }
+}
+
+#[cfg(test)]
+mod free_port_tests {
+    use super::free_local_port;
+
+    #[test]
+    fn skips_a_taken_port() {
+        let taken = std::net::TcpListener::bind(("127.0.0.1", 0)).unwrap();
+        let port = taken.local_addr().unwrap().port();
+        let picked = free_local_port(port);
+        assert_ne!(picked, port);
+        assert!(std::net::TcpListener::bind(("127.0.0.1", picked)).is_ok());
     }
 }
 

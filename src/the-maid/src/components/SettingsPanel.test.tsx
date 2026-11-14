@@ -23,8 +23,8 @@ function mockBaseResponses() {
 
 async function openAboutSection() {
   render(<SettingsPanel />);
-  await waitFor(() => expect(screen.getByText("⚙️ Settings")).toBeDefined());
-  fireEvent.click(screen.getByText("ℹ️ About"));
+  await waitFor(() => expect(screen.getByText("Settings")).toBeDefined());
+  fireEvent.click(screen.getByText("About"));
   await waitFor(() =>
     expect(screen.getByText(/Lightning Donation/i)).toBeDefined()
   );

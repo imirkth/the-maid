@@ -6,13 +6,16 @@ Handles all requests from Tauri frontend.
 from fastapi import FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel, Field
-from typing import List, Optional
+from typing import List, Literal, Optional
 import json
 import os
 
 from .scanner import FileScanner
 from .sandbox import validate_path
 from .models import LLMManager
+from .tree_architect import TO_SORT, TreeArchitect, TreeRouter, load_model
+from .preferences import Preferences, load_preferences, save_preferences
+from .feedback import ACTIONS as FEEDBACK_ACTIONS, clean_folder_path, load_feedback, save_feedback
 from .face_detector import FaceDetector, detect_faces_for_scan
 from .face_cluster import FaceClusterer, cluster_faces_from_scan
 from .face_tagger import rename_cluster_with_tags, get_clusters_for_ui
@@ -46,6 +49,15 @@ def load_sandbox_folders() -> Optional[List[str]]:
 
 def _sandbox_folders() -> Optional[List[str]]:
     return load_sandbox_folders()
+
+
+def face_clustering_enabled() -> bool:
+    """The "Face clustering" switch in Settings (off unless turned on)."""
+    try:
+        with open(SETTINGS_PATH, "r") as f:
+            return bool(json.load(f).get("features", {}).get("face_clustering", False))
+    except (OSError, json.JSONDecodeError, AttributeError):
+        return False
 
 
 # --- Models ---
@@ -93,13 +105,16 @@ class TreeFileEntry(BaseModel):
     confidence: float = 0.0
     tags: List[str] = []
     approved: bool = False
+    dest_root: str = ""
 
 class TreeSubCategory(BaseModel):
     name: str = ""
+    rationale: str = ""
     files: List[TreeFileEntry] = []
 
 class TreeCategoryModel(BaseModel):
     name: str = ""
+    rationale: str = ""
     children: List[TreeSubCategory] = []
 
 class TreeState(BaseModel):
@@ -107,6 +122,7 @@ class TreeState(BaseModel):
     approved_structure: bool = False
     total_files: int = 0
     total_categorized: int = 0
+    summary: dict = {}
 
 class MergeRequest(BaseModel):
     categories: List[dict] = []
@@ -161,13 +177,11 @@ async def scan_directory(request: ScanRequest):
     return {"files": files, "errors": scanner.errors, "count": scanner.scanned_count}
 
 @app.post("/categorize")
-async def categorize_files(request: CategorizeRequest):
-    """Two-tier categorization pipeline.
+def categorize_files(request: CategorizeRequest):
+    """Design a new folder tree for the scanned files (see tree_architect).
 
-    Tier 1: Sub-agents categorize files per-folder → local category trees
-    Tier 2: Main agent merges all sub-trees → unified tree
-
-    Returns a category tree structure for the frontend to render.
+    Returns the category tree for the frontend to render, plus a ``summary``
+    comparing the current folder structure with the proposed one.
     """
     import json as _json
     import time as _time
@@ -181,96 +195,79 @@ async def categorize_files(request: CategorizeRequest):
     # EXIF extraction adds camera, GPS, date, dimensions for image files.
     # All three degrade gracefully — no crash if insightface/PIL unavailable.
     files = request.files
-    detector = FaceDetector()
-    detect_faces_for_scan(files, detector)
-    cluster_faces_from_scan(files)
+    if face_clustering_enabled():
+        detector = FaceDetector()
+        detect_faces_for_scan(files, detector)
+        cluster_faces_from_scan(files)
     for f in files:
         f["exif"] = extract_exif(f.get("path", ""))
 
     llm = LLMManager()
-    llm_loaded = llm.load_model()
+    llm.load_model()
 
     # Emit start
     print(_json.dumps({"event": "categorize_start", "total": total}), flush=True)
 
-    # Run the two-tier pipeline
+    # Design the tree
     _cat_start = _time.monotonic()
-    result = llm.categorize_all(files, _sandbox_folders(), scan_root=request.directory)
+    result = llm.categorize_all(files, _sandbox_folders(), scan_root=request.directory,
+                               prefs=load_preferences(), feedback=load_feedback())
     _cat_elapsed = _time.monotonic() - _cat_start
 
     # Emit completion
     print(_json.dumps({"event": "categorize_complete", "total": total, "elapsed_seconds": round(_cat_elapsed, 1)}), flush=True)
 
-    # Convert unified tree → frontend format
+    # Convert the designed tree → frontend format. Every file carries the
+    # organised root it will be moved under, so execution builds ONE tree at
+    # <dest_root>/<Category>/<sub/path>/ instead of nesting inside each
+    # file's current folder.
+    dest_root = os.path.abspath(request.directory) if request.directory else ""
     categories_list = []
     categorized_count = 0
 
-    for node in result.get("tree", []):
-        cat_name = node.get("category", "Uncategorized")
-        subbuckets = node.get("subbuckets", [])
-        rationale = node.get("rationale", "")
+    def _entry(f: dict, cat_name: str, sub_name: str, rationale: str) -> dict:
+        rel = "/".join(x for x in (cat_name, sub_name, f.get("filename", "")) if x)
+        return {
+            "file_id": f.get("file_id", ""),
+            "filename": f.get("filename", ""),
+            "path": f.get("path", ""),
+            "proposed_path": rel,
+            "dest_root": dest_root,
+            "size_bytes": f.get("size_bytes", 0),
+            "rationale": rationale,
+            "confidence": 0.0 if cat_name == TO_SORT else 0.8,
+            "tags": [],
+        }
 
+    for node in result.get("tree", []):
+        cat_name = node.get("category", TO_SORT)
         cat_children = []
         cat_count = 0
-
-        for sub in subbuckets:
+        for sub in node.get("subbuckets", []):
             sub_name = sub.get("subcategory", "")
-            file_ids = sub.get("files", [])
-            cat_count += len(file_ids)
-
+            rationale = sub.get("rationale") or node.get("rationale", "")
+            entries = [
+                _entry(request.files[fid], cat_name, sub_name, rationale)
+                for fid in sub.get("files", []) if 0 <= fid < total
+            ]
+            cat_count += len(entries)
             if sub_name:
-                # Named subcategory → nested bucket
-                sub_files = []
-                for fid in file_ids:
-                    if 0 <= fid < total:
-                        f = request.files[fid]
-                        current = f.get("path", "")
-                        proposed = f"{cat_name}/{sub_name}/{f.get('filename', '')}" if sub_name else f"{cat_name}/{f.get('filename', '')}"
-                        sub_files.append({
-                            "file_id": f.get("file_id", ""),
-                            "filename": f.get("filename", ""),
-                            "path": current,
-                            "proposed_path": proposed,
-                            "size_bytes": f.get("size_bytes", 0),
-                            "rationale": rationale,
-                            "confidence": 0.8,
-                            "tags": [],
-                        })
-                cat_children.append({
-                    "name": sub_name,
-                    "count": len(sub_files),
-                    "files": sub_files,
-                })
+                cat_children.append({"name": sub_name, "count": len(entries),
+                                     "rationale": rationale, "files": entries})
             else:
-                # No subcategory → files directly under category
-                for fid in file_ids:
-                    if 0 <= fid < total:
-                        f = request.files[fid]
-                        current = f.get("path", "")
-                        proposed = f"{cat_name}/{f.get('filename', '')}"
-                        cat_children.append({
-                            "name": f.get("filename", ""),
-                            "file_id": f.get("file_id", ""),
-                            "filename": f.get("filename", ""),
-                            "path": current,
-                            "proposed_path": proposed,
-                            "size_bytes": f.get("size_bytes", 0),
-                            "rationale": rationale,
-                            "confidence": 0.8,
-                            "tags": [],
-                        })
+                cat_children.extend({"name": e["filename"], **e} for e in entries)
 
-        if cat_name != "Uncategorized":
+        if cat_name not in (TO_SORT, "Uncategorized"):
             categorized_count += cat_count
 
         categories_list.append({
             "name": cat_name,
             "count": cat_count,
+            "rationale": node.get("rationale", ""),
             "children": cat_children,
         })
 
-    # Sort by count descending
-    categories_list.sort(key=lambda c: c["count"], reverse=True)
+    summary = result.get("summary", {})
 
     # Merge into persistent tree and save
     existing = _load_tree()
@@ -279,12 +276,14 @@ async def categorize_files(request: CategorizeRequest):
         "approved_structure": existing.get("approved_structure", False),
         "total_files": total,
         "total_categorized": categorized_count,
+        "summary": summary,
     })
 
     return {
         "categories": categories_list,
         "total_files": total,
         "total_categorized": categorized_count,
+        "summary": summary,
     }
 
 @app.post("/approve")
@@ -342,7 +341,7 @@ async def write_metadata(file_path: str, tags: List[str]):
     return {"file": file_path, "tags_written": len(tags)}
 
 @app.post("/faces/detect")
-async def detect_faces(directory: str):
+def detect_faces(directory: str):
     """Detect faces in all images in a directory (Slice 6A)."""
     validate_path(directory, _sandbox_folders())
     scanner = FileScanner()
@@ -360,7 +359,7 @@ async def detect_faces(directory: str):
     }
 
 @app.post("/faces/cluster")
-async def cluster_faces(directory: str):
+def cluster_faces(directory: str):
     """Detect + cluster faces in a directory (Slice 6A + 6B combined)."""
     validate_path(directory, _sandbox_folders())
     scanner = FileScanner()
@@ -486,13 +485,16 @@ async def merge_tree(request: MergeRequest):
     # Update counts
     total = request.total_files + existing.get("total_files", 0)
     cat_count = request.total_categorized + existing.get("total_categorized", 0)
+    summary = existing.get("summary", {})
     _save_tree({
         "tree": existing_tree,
         "approved_structure": existing.get("approved_structure", False),
         "total_files": total,
         "total_categorized": cat_count,
+        "summary": summary,
     })
-    return {"status": "ok", "tree": existing_tree, "total_files": total, "total_categorized": cat_count}
+    return {"status": "ok", "tree": existing_tree, "total_files": total,
+            "total_categorized": cat_count, "summary": summary}
 
 @app.put("/tree/category")
 async def edit_category(edit: CategoryEdit):
@@ -526,6 +528,11 @@ async def edit_category(edit: CategoryEdit):
     data["tree"] = tree
     _save_tree(data)
     return {"status": "ok", "tree": tree}
+
+def _is_subfolder(child: dict) -> bool:
+    """A sub-folder entry (even an emptied one), as opposed to a direct file entry."""
+    return "files" in child and not child.get("file_id")
+
 
 @app.put("/tree/file")
 async def move_file(move: FileMove):
@@ -564,7 +571,7 @@ async def move_file(move: FileMove):
     if move.target_subcategory:
         target_sub = None
         for child in target_cat["children"]:
-            if child.get("name") == move.target_subcategory and child.get("files"):
+            if child.get("name") == move.target_subcategory and _is_subfolder(child):
                 target_sub = child
                 break
         if not target_sub:
@@ -585,46 +592,214 @@ async def approve_structure():
     _save_tree(data)
     return {"status": "ok"}
 
+def _unique_dest(dest: str) -> str:
+    """Never overwrite: 'a.pdf' -> 'a (2).pdf' when the name is taken."""
+    if not os.path.exists(dest):
+        return dest
+    stem, ext = os.path.splitext(dest)
+    n = 2
+    while os.path.exists(f"{stem} ({n}){ext}"):
+        n += 1
+    return f"{stem} ({n}){ext}"
+
+
+def _tree_file_entries(tree: list):
+    """Yield (category, subcategory, file_entry) for every file in the tree."""
+    for cat in tree:
+        cat_name = cat.get("name", "")
+        for child in cat.get("children", []):
+            if child.get("files"):
+                for f in child["files"]:
+                    yield cat_name, child.get("name", ""), f
+            elif child.get("file_id"):
+                yield cat_name, "", child
+
+
+def _prune_empty_dirs(start: str, stop: str) -> None:
+    """Remove folders emptied by the moves, up to (not including) the root."""
+    stop = os.path.abspath(stop) if stop else ""
+    cur = os.path.abspath(start)
+    while stop and cur != stop and cur.startswith(stop + os.sep):
+        try:
+            os.rmdir(cur)  # only succeeds when empty
+        except OSError:
+            return
+        cur = os.path.dirname(cur)
+
+
 @app.post("/tree/execute")
 async def execute_moves(approved_file_ids: List[str]):
-    """Move approved files on disk according to the tree. Uses trash for safety."""
+    """Move approved files on disk into the designed tree.
+
+    Files go to <dest_root>/<Category>/<sub/path>/<filename>, where dest_root is
+    the folder that was scanned — one organised tree, not a copy of the
+    category folders inside every existing folder. Name clashes get a
+    ' (2)' suffix; nothing is ever overwritten. 'To Sort' files stay put.
+    """
     import shutil
-    import send2trash
     data = _load_tree()
     tree = data.get("tree", [])
     sandbox = _sandbox_folders() or []
+    approved = set(approved_file_ids)
+    entries = list(_tree_file_entries(tree))
+    sources = [f.get("path", "") for _, _, f in entries if f.get("path")]
+    fallback_root = os.path.commonpath(sources) if sources else ""
+    if fallback_root and os.path.isfile(fallback_root):
+        fallback_root = os.path.dirname(fallback_root)
     results = []
-    for cat in tree:
-        cat_name = cat.get("name", "")
-        if cat_name == "Uncategorized":
+    moved_paths = []
+    for cat_name, sub_name, f in entries:
+        fid = f.get("file_id", "")
+        if fid not in approved or cat_name in ("Uncategorized", TO_SORT):
             continue
-        for child in cat.get("children", []):
-            if child.get("files"):
-                sub_name = child.get("name", "")
-                for f in child["files"]:
-                    fid = f.get("file_id", "")
-                    if fid not in approved_file_ids:
-                        continue
-                    src = f.get("path", "")
-                    if not src:
-                        results.append({"file_id": fid, "status": "error", "detail": "no source path"})
-                        continue
-                    try:
-                        validate_path(src, sandbox)
-                        dest_dir = os.path.join(os.path.dirname(src), cat_name, sub_name) if sub_name else os.path.join(os.path.dirname(src), cat_name)
-                        os.makedirs(dest_dir, exist_ok=True)
-                        dest = os.path.join(dest_dir, f.get("filename", os.path.basename(src)))
-                        if os.path.exists(dest) and os.path.abspath(src) != os.path.abspath(dest):
-                            # Conflict: trash the existing one (recoverable)
-                            send2trash.send2trash(dest)
-                        if os.path.abspath(src) != os.path.abspath(dest):
-                            shutil.move(src, dest)
-                            results.append({"file_id": fid, "status": "moved", "dest": dest})
-                        else:
-                            results.append({"file_id": fid, "status": "already_in_place"})
-                    except Exception as e:
-                        results.append({"file_id": fid, "status": "error", "detail": str(e)})
+        src = f.get("path", "")
+        if not src:
+            results.append({"file_id": fid, "status": "error", "detail": "no source path"})
+            continue
+        try:
+            validate_path(src, sandbox)
+            root = f.get("dest_root") or fallback_root
+            parts = [p for p in sub_name.split("/") if p and p not in (".", "..")]
+            dest_dir = os.path.join(root, cat_name, *parts)
+            dest = os.path.join(dest_dir, f.get("filename") or os.path.basename(src))
+            validate_path(dest, sandbox)
+            if os.path.abspath(src) == os.path.abspath(dest):
+                results.append({"file_id": fid, "status": "already_in_place"})
+                continue
+            os.makedirs(dest_dir, exist_ok=True)
+            dest = _unique_dest(dest)
+            shutil.move(src, dest)
+            f["path"] = dest
+            moved_paths.append((src, dest))
+            results.append({"file_id": fid, "status": "moved", "dest": dest})
+            _prune_empty_dirs(os.path.dirname(src), root)
+        except Exception as e:
+            results.append({"file_id": fid, "status": "error", "detail": str(e)})
+    if moved_paths:
+        _save_tree(data)  # keep tree paths in sync with disk
+        fb = load_feedback()  # and keep the user's rules attached to the moved files
+        for old, new in moved_paths:
+            fb.file_moved(old, new)
+        save_feedback(fb)
     return {"results": results}
+
+
+@app.get("/preferences")
+async def get_preferences():
+    """The user's saved tree preferences (defaults if never answered)."""
+    return load_preferences().to_dict()
+
+
+@app.put("/preferences")
+async def put_preferences(data: dict):
+    """Save the answers from the preference check; applied to every later build."""
+    prefs = Preferences.from_dict({**data, "answered": True})
+    for folder in prefs.protected:
+        try:
+            validate_path(folder, _sandbox_folders())
+        except ValueError as e:
+            raise HTTPException(status_code=400, detail=str(e))
+    save_preferences(prefs)
+    return prefs.to_dict()
+
+
+@app.post("/tree/choices")
+def tree_choices(request: CategorizeRequest):
+    """Preference check: questions whose options are previewed on the user's own files."""
+    if request.directory:
+        try:
+            validate_path(request.directory, _sandbox_folders())
+        except ValueError as e:
+            raise HTTPException(status_code=400, detail=str(e))
+    files = request.files
+    for f in files:
+        if "exif" not in f:
+            f["exif"] = extract_exif(f.get("path", ""))
+    architect = TreeArchitect(request.directory, prefs=load_preferences())
+    return architect.preview_choices(files)
+
+
+class FeedbackRequest(BaseModel):
+    action: Literal["pin", "unpin", "exclude", "include", "rename", "reset"]
+    path: str = ""            # folder path in the tree: "Category/sub/path"
+    new_path: str = ""        # rename only
+    file_ids: List[str] = []  # files from the current tree...
+    files: List[str] = []     # ...or absolute file paths
+
+
+def _tree_folder_files(folder: str) -> List[str]:
+    """Paths of the files currently in a tree folder (and the folders below it)."""
+    folder = clean_folder_path(folder)
+    out = []
+    for cat, sub, f in _tree_file_entries(_load_tree().get("tree", [])):
+        here = clean_folder_path(f"{cat}/{sub}" if sub else cat)
+        if f.get("path") and (here == folder or here.startswith(folder + "/")):
+            out.append(f["path"])
+    return out
+
+
+@app.post("/tree/feedback")
+async def record_feedback(req: FeedbackRequest):
+    """Record a tree edit as a rule the builder follows on every rebuild.
+
+    pin      path + files/file_ids — these files belong in this folder; with no
+             files, pins everything currently in that folder ("accept folder").
+    unpin    files, or a whole folder via path — let the builder decide again.
+    exclude  files — leave them out of the plan; include undoes it.
+    rename   path -> new_path — moves the folder's pins and pins its files.
+    reset    forget every rule.
+    """
+    assert req.action in FEEDBACK_ACTIONS
+    files = list(req.files)
+    if req.file_ids:
+        by_id = {f.get("file_id"): f.get("path") for _, _, f in _tree_file_entries(_load_tree().get("tree", []))}
+        missing = [i for i in req.file_ids if not by_id.get(i)]
+        if missing:
+            raise HTTPException(status_code=400, detail=f"unknown file ids: {', '.join(missing[:5])}")
+        files += [by_id[i] for i in req.file_ids]
+    if req.action in ("pin", "rename") and not files and req.path:
+        files = _tree_folder_files(req.path)
+    sandbox = _sandbox_folders()
+    for f in files:
+        try:
+            validate_path(f, sandbox)
+        except ValueError as e:
+            raise HTTPException(status_code=400, detail=str(e))
+    fb = load_feedback()
+    try:
+        fb.apply(req.action, files, req.path, req.new_path)
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+    save_feedback(fb)
+    return _feedback_view(fb)
+
+
+@app.get("/tree/feedback")
+async def get_feedback():
+    return _feedback_view(load_feedback())
+
+
+def _feedback_view(fb) -> dict:
+    return {
+        "folders": [{"path": k, "files": len(v)} for k, v in sorted(fb.folders().items())],
+        "pinned_files": len(fb.pins),
+        "excluded_files": len(fb.excluded),
+    }
+
+
+class RouteRequest(BaseModel):
+    files: List[dict] = []
+    directory: str = ""
+
+
+@app.post("/tree/route")
+def route_files(request: RouteRequest):
+    """Suggest where new files belong in the approved tree ("keep it live")."""
+    router = TreeRouter(load_model())
+    return {"suggestions": [
+        {"file_id": f.get("file_id", ""), **router.route(f, request.directory)}
+        for f in request.files
+    ]}
 
 
 @app.put("/tree/subcategory")
@@ -694,18 +869,21 @@ async def bulk_move_files(req: BulkMoveRequest):
     tree = data.get("tree", [])
     # Collect and remove all target files from their current locations
     found_files = []
+    wanted = set(req.file_ids)
     for cat in tree:
-        for i, child in enumerate(cat.get("children", [])):
-            if child.get("files"):
+        kept_children = []  # rebuilt, never popped while iterating (that skipped neighbours)
+        for child in cat.get("children", []):
+            if _is_subfolder(child):
                 remaining = []
                 for f in child["files"]:
-                    if f.get("file_id") in req.file_ids:
-                        found_files.append(f)
-                    else:
-                        remaining.append(f)
+                    (found_files if f.get("file_id") in wanted else remaining).append(f)
                 child["files"] = remaining
-            elif child.get("file_id") in req.file_ids:
-                found_files.append(cat["children"].pop(i))
+                kept_children.append(child)
+            elif child.get("file_id") in wanted:
+                found_files.append(child)
+            else:
+                kept_children.append(child)
+        cat["children"] = kept_children
     # Find or create target category
     target_cat = None
     for cat in tree:
@@ -718,7 +896,7 @@ async def bulk_move_files(req: BulkMoveRequest):
     if req.target_subcategory:
         target_sub = None
         for child in target_cat["children"]:
-            if child.get("name") == req.target_subcategory and child.get("files"):
+            if child.get("name") == req.target_subcategory and _is_subfolder(child):
                 target_sub = child
                 break
         if not target_sub:
